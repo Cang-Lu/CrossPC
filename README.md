@@ -481,8 +481,27 @@ python tools/run-tests.py                      # 一键真机验收(含上面两
 
 ### 和 Barrier / Deskflow / InputLeap 的关系
 
-它们是成熟的开源同类工具，功能比 CrossPC 多（多平台、图片剪贴板、TLS 等）。
+它们是成熟的开源同类工具，功能比 CrossPC 多（多平台、加密传输等）。
 CrossPC 的定位是：**零依赖、代码量小到能自己读懂并改动、专门针对
 "Windows 带键鼠 + Debian 当副屏"这一种拓扑**。想看它的实现，
 从 `layout.py` + `router.py`（位置计算）和 `backend/windows.py`（钩子与注入）
 三个文件读起就够了。
+
+### 持续集成
+
+[.github/workflows/ci.yml](.github/workflows/ci.yml) 在 GitHub 上跑三件事：
+
+| 任务 | 覆盖 |
+|---|---|
+| 单元/集成测试 | Ubuntu 22.04(Python 3.8) / Ubuntu latest(3.11、3.13) / Windows(3.12) |
+| `crosspc selftest` | **在真 Linux 内核上**跑完整回环（假后端，不需要真实键鼠） |
+| 打包与安装 | `pip install .` + `make_release.py` + 校验发行包里没有缓存/私有配置 |
+
+开发机是 Windows，Linux 那条路（X11/uinput 注入、xclip 剪辑板）在本机跑不起来，
+所以 CI 里的 Linux 任务不是走过场——它是唯一能验证 Linux 侧运行路径的地方。
+真键鼠相关的两项（`capturetest` / `injecttest`）故意不在 CI 里跑：CI 机器没有
+交互桌面，跑了必然失败，那是环境限制而不是代码问题。
+
+## 许可证
+
+[MIT](LICENSE)。

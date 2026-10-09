@@ -335,30 +335,41 @@ class TestBackendContract(unittest.TestCase):
         with self.assertRaises(BackendError):
             b.set_forwarding(True)
 
-    def test_prepare_uinput_raises_backend_error_on_windows(self):
-        # 关键契约: Windows 上必须抛 BackendError(上层只捕获它), 不能是
-        # FileNotFoundError/OSError 之类的原生异常
-        b = LinuxBackend(prefer="uinput")
-        try:
-            b.prepare()
-        except BackendError as exc:
-            self.assertTrue(str(exc))
-        except Exception as exc:                     # pragma: no cover
-            self.fail("prepare() 抛了 %s 而不是 BackendError: %s"
-                      % (type(exc).__name__, exc))
-        else:                                        # pragma: no cover
-            self.fail("Windows 上 prepare(prefer='uinput') 居然成功了")
-        finally:
+    def test_prepare_never_leaks_raw_exceptions(self):
+        """prepare() 的契约: 要么成功, 要么抛 BackendError。
+
+        上层只 catch BackendError, 所以 FileNotFoundError / OSError / 权限错误
+        这类原生异常绝不能漏出去。开发机(Windows)上必然抛; 真 Linux 上如果
+        /dev/uinput 可写就会成功(并且真的建出一个虚拟指针设备, close() 会销毁),
+        两种都算合规 —— 这条断言的是契约, 不是某个平台的结果。
+        """
+        for prefer in ("uinput", "x11", None):
+            b = LinuxBackend(prefer=prefer)
+            try:
+                b.prepare()
+            except BackendError as exc:
+                self.assertTrue(str(exc), "错误信息不能为空")
+            except Exception as exc:                 # pragma: no cover
+                self.fail("prepare(prefer=%r) 抛了 %s 而不是 BackendError: %s"
+                          % (prefer, type(exc).__name__, exc))
+            finally:
+                b.close()
+
+    @unittest.skipUnless(sys.platform == "win32",
+                         "这条断言的是 Windows 上的必然结果")
+    def test_prepare_raises_on_windows(self):
+        """Windows 上没有 /dev/uinput 也没有 X, 三种 prefer 都必须抛 BackendError。"""
+        for prefer in ("uinput", "x11", None):
+            b = LinuxBackend(prefer=prefer)
+            with self.assertRaises(BackendError):
+                b.prepare()
             b.close()
 
-    def test_prepare_x11_raises_backend_error(self):
+    def test_prepare_x11_without_display_raises(self):
+        """没有 DISPLAY 时, 明确要求 X11 注入必须给出 BackendError 而不是崩。"""
+        if os.environ.get("DISPLAY"):
+            self.skipTest("当前有 DISPLAY, 这条测的是无 X 时的行为")
         b = LinuxBackend(prefer="x11")
-        with self.assertRaises(BackendError):
-            b.prepare()
-        b.close()
-
-    def test_prepare_auto_raises_backend_error_on_windows(self):
-        b = LinuxBackend()
         with self.assertRaises(BackendError):
             b.prepare()
         b.close()

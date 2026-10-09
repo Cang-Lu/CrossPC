@@ -9,6 +9,7 @@ version = "0.1.0"
 description = "局域网内共享一套鼠标键盘(Windows server + Debian client)"
 readme = "README.md"
 requires-python = ">=3.8"
+license = {text = "MIT"}
 #: 运行时零依赖 —— 真的一个第三方包都不需要
 dependencies = []
 keywords = ["kvm", "synergy", "barrier", "clipboard", "lan", "remote-input"]
@@ -27,6 +28,3 @@ crosspc = "crosspc.cli:main"
 
 [tool.setuptools]
 packages = ["crosspc", "crosspc.backend"]
-
-[tool.setuptools.package-data]
-crosspc = ["py.typed"]
