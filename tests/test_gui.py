@@ -45,6 +45,14 @@ class TestGui(unittest.TestCase):
         self.root = tk.Tk()
         self.root.withdraw()                 # 绝不显示窗口
         self.app = GuiApp(self.root, self.cfg, Log("error"))
+        # 界面里的"本机分辨率"是运行时探测出来的: 开发机 1920x1080, 而 CI 的
+        # Windows runner 只有 1024x768 —— 于是"贴到 x=1920"这种断言在 CI 上
+        # 必然失败(吸附距离超出容差, 根本不会吸附)。测试必须自己钉死几何,
+        # 不能依赖宿主机屏幕。CI 第一次跑就是这么红的。
+        self.app.server_rect = Rect(0, 0, 1920, 1080)
+        self.app.monitors = [Rect(0, 0, 1920, 1080)]
+        self.app.refresh_list()
+        self.app.canvas.redraw()
         self.root.update_idletasks()
 
     def tearDown(self):
@@ -99,6 +107,19 @@ class TestGui(unittest.TestCase):
         self.cfg.clients = [c for c in self.cfg.clients
                             if c.name != self.app.selected]
         self.assertEqual(len(self.cfg.clients), before)
+
+    def test_snap_works_on_other_resolutions(self):
+        """吸附是纯几何计算, 不该和宿主分辨率绑定。
+
+        这条是 CI 教我的: 原来那三条用例把"本机 1920x1080"写死了, 在 CI 的
+        1024x768 runner 上必红。这里显式换一个分辨率再验证一次, 万一以后
+        有人又把分辨率假设写回代码里, 这条会立刻报出来。
+        """
+        self.app.server_rect = Rect(0, 0, 1024, 768)
+        self.app.move_client("debian", 1014, 3, snap=True)
+        self.assertEqual(self.cfg.clients[0].rect, Rect(1024, 0, 2560, 1440))
+        self.app.move_client("debian", 40, 778, snap=True)
+        self.assertEqual(self.cfg.clients[0].rect, Rect(40, 768, 2560, 1440))
 
     def test_form_apply_updates_model(self):
         self.app.select("debian")
@@ -160,6 +181,7 @@ class TestGui(unittest.TestCase):
         cache = SizeCache(SizeCache.default_path(cfg.path))
         cache.set("debian", 2560, 1440)
         app = GuiApp(self.root, cfg, Log("error"))
+        app.server_rect = Rect(0, 0, 1920, 1080)      # 不依赖宿主分辨率
         rects = [r for n, r, s, _ in app.machines_for_canvas() if not s]
         self.assertEqual(rects[0], Rect(0, 0, 2560, 1440))
         del app
