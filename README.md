@@ -1,5 +1,8 @@
 # CrossPC —— 局域网内共享一套鼠标键盘
 
+[![CI](https://github.com/Cang-Lu/CrossPC/actions/workflows/ci.yml/badge.svg)](https://github.com/Cang-Lu/CrossPC/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 两台电脑（一台 Windows 接了键鼠，一台 Debian 没接），**鼠标从这台屏幕的边缘推出去，
 就跑到另一台屏幕上继续用**；键盘跟着鼠标走；两边的复制粘贴内容也能互相同步。
 

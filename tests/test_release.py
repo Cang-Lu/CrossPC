@@ -50,7 +50,9 @@ class TestMakeRelease(unittest.TestCase):
         rels = {rel for _, rel in MR.collect(with_tests=True)}
         for want in ("crosspc/__init__.py", "crosspc/backend/windows.py",
                      "crosspc/backend/linux.py", "crosspc/image.py",
-                     "README.md", "pyproject.toml", "tools/install_linux.sh"):
+                     "README.md", "pyproject.toml", "tools/install_linux.sh",
+                     # MIT 要求许可声明随副本分发, 所以发行包里必须有它
+                     "LICENSE"):
             self.assertIn(want, rels)
 
     def test_build_produces_readable_zip(self):

@@ -22,7 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 #: 必须打进包里的目录/文件
 INCLUDE_DIRS = ("crosspc", "tools", "tests")
-INCLUDE_FILES = ("README.md", "pyproject.toml", ".gitignore")
+#: LICENSE 必须进包: MIT 的条款要求"本许可声明需随软件的所有副本一起分发"
+INCLUDE_FILES = ("README.md", "pyproject.toml", ".gitignore", "LICENSE")
 
 #: 不打包的目录名与后缀
 EXCLUDE_DIRS = {"__pycache__", ".git", ".idea", ".vscode", "dist", "build"}
