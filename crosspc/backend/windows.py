@@ -1,27 +1,36 @@
-"""Windows 后端: 低层键鼠钩子 + SendInput 注入 + 系统剪辑板。
+"""Windows backend: low-level keyboard/mouse hooks + SendInput injection + system clipboard.
 
-只用 ctypes 调 user32/kernel32, 不需要 pip 装任何东西。
+Only ctypes is used to call user32/kernel32; nothing has to be installed with pip.
 
-## 捕获与"接管"是怎么做的
+## How capture and "takeover" work
 
-* 用 WH_KEYBOARD_LL / WH_MOUSE_LL 两个低层钩子观察全局输入。钩子函数挂在
-  一个专职线程上, 该线程只跑消息循环, 回调里**只做算术和入队**, 绝不写日志、
-  绝不做网络 IO —— 低层钩子超时(默认 300ms)会被系统直接摘掉, 那意味着
-  用户的键鼠突然"不听话", 这是本工具最危险的失败模式。
-* 本地模式(未接管): 钩子看到了事件但一律放行, 我们只是"顺便"知道鼠标在哪、
-  往哪推。用户完全感觉不到工具存在。
-* 转发模式(接管): 钩子返回 1 把按键/滚轮/鼠标键全部吞掉, 交给上层转发给
-  client。鼠标**移动**没法被钩子拦住(光标由输入栈直接更新), 所以我们用
-  "回中(park)"的办法: 每收到一次移动就把光标 SetCursorPos 回到停靠点,
-  位移量则通过相邻两次 pt 的差值算出来 —— 这样既拿到了不受限的位移,
-  本机光标又始终停在屏幕边角不乱跑。
-* 钩子函数里发生的异常会被 Python 打到 stderr 并让回调返回 0(=放行),
-  再加上看门狗线程与 atexit, 保证"任何异常都不会把用户的键盘吞死"。
+* Two low-level hooks, WH_KEYBOARD_LL / WH_MOUSE_LL, observe global input. The
+  hook functions live on a dedicated thread that does nothing but run the message
+  loop, and the callbacks **only do arithmetic and enqueue**, never logging and
+  never doing network IO -- a low-level hook timeout (300 ms by default) gets the
+  hook torn off by the system, which means the user's keyboard and mouse suddenly
+  "stop obeying", and that is the most dangerous failure mode of this tool.
+* Local mode (not taken over): the hooks see the events but let every one of them
+  through; we only learn where the mouse is and which way it is being pushed on
+  the side. The user cannot tell the tool is there at all.
+* Forwarding mode (taken over): the hooks return 1 to suppress keys/wheel/mouse
+  buttons entirely and hand them to the upper layer to forward to the client.
+  Mouse **movement** cannot be intercepted by a hook (the cursor is updated
+  directly by the input stack), so we use the "recenter (park)" trick: on every
+  movement we SetCursorPos the cursor back to the park point, and derive the
+  delta from the difference between two consecutive pt values -- that way we get
+  unrestricted movement while the local cursor stays parked in the corner of the
+  screen instead of running around.
+* An exception inside a hook function is printed to stderr by Python and makes
+  the callback return 0 (= pass through); together with the watchdog thread and
+  atexit this guarantees that "no exception ever swallows the user's keyboard
+  for good".
 
-## 注入(client 角色)
+## Injection (client role)
 
-SetCursorPos 做绝对定位, SendInput(KEYEVENTF_SCANCODE) 发按键, 用扫描码
-而不是字符, 因此和 server 的键盘布局无关。
+SetCursorPos provides absolute positioning and SendInput(KEYEVENTF_SCANCODE)
+sends key presses, using scancodes rather than characters, so it is independent
+of the server's keyboard layout.
 """
 from __future__ import annotations
 
@@ -44,7 +53,7 @@ from .base import Backend, BackendError, LogFn, SinkFn
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
-# ------------------------------------------------------------------ 常量
+# ------------------------------------------------------------------ constants
 WH_KEYBOARD_LL = 13
 WH_MOUSE_LL = 14
 HC_ACTION = 0
@@ -80,14 +89,16 @@ CF_DIBV5 = 17
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
 
-#: 单次移动超过这个像素数就当成"被别的程序 warp 了", 只更新位置不产生位移,
-#: 免得一帧跳几千像素把光标甩到隔壁屏幕去。
+#: A single movement larger than this many pixels counts as "warped by another
+#: program": only the position is updated and no delta is produced, so that a jump
+#: of thousands of pixels in one frame does not fling the cursor onto the screen
+#: next door.
 WARP_LIMIT = 600
 
 ULONG_PTR = ctypes.c_size_t
 
 
-# ------------------------------------------------------------------ 结构体
+# ------------------------------------------------------------------ structures
 class POINT(ctypes.Structure):
     _fields_ = [("x", wt.LONG), ("y", wt.LONG)]
 
@@ -156,7 +167,8 @@ user32.IsClipboardFormatAvailable.argtypes = [wt.UINT]
 kernel32.GlobalSize.restype = ctypes.c_size_t
 kernel32.GlobalSize.argtypes = [wt.HGLOBAL]
 
-# 下面这些 restype 必须显式声明成指针大小, 否则 64 位下默认 int 会把句柄截断
+# The restypes below must be declared explicitly as pointer-sized, otherwise the
+# default int truncates handles on 64-bit
 kernel32.GetModuleHandleW.restype = wt.HMODULE
 kernel32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
 kernel32.GetCurrentThreadId.restype = wt.DWORD
@@ -181,13 +193,13 @@ user32.GetClipboardFormatNameW.argtypes = [wt.UINT, wt.LPWSTR, ctypes.c_int]
 
 
 def _short(v: int) -> int:
-    """把 DWORD 的低 16 位当有符号短整型解释(滚轮增量就是这么存的)。"""
+    """Interpret the low 16 bits of a DWORD as a signed short (this is how the wheel delta is stored)."""
     v &= 0xFFFF
     return v - 0x10000 if v >= 0x8000 else v
 
 
 def _enable_dpi_awareness() -> str:
-    """必须在任何窗口/坐标查询之前调用, 否则高 DPI 下坐标会被缩放搞乱。"""
+    """Must be called before any window/coordinate query, otherwise scaling garbles coordinates under high DPI."""
     try:
         if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
             return "per-monitor-v2"
@@ -230,15 +242,15 @@ class WindowsBackend(Backend):
         self._watchdog_stop = threading.Event()
         self._send_failures = 0
         self._png_fmt: Optional[int] = None
-        #: 单张图最多多少像素(防御畸形数据/超大截图把内存吃光)
+        #: Maximum pixels for one image (defends against malformed data / a huge screenshot eating all the memory)
         self.image_pixel_cap = DEFAULT_PIXEL_CAP
         atexit.register(self.emergency_restore)
 
-    # ------------------------------------------------------------ 生命周期
+    # ------------------------------------------------------------ lifecycle
     def prepare(self) -> None:
         if not self._dpi:
             self._dpi = _enable_dpi_awareness()
-            self.log("DPI 感知: %s" % self._dpi)
+            self.log("DPI awareness: %s" % self._dpi)
         p = POINT()
         if user32.GetCursorPos(ctypes.byref(p)):
             self._last_pt = (p.x, p.y)
@@ -248,7 +260,7 @@ class WindowsBackend(Backend):
         self.stop_capture()
         self._watchdog_stop.set()
 
-    # ------------------------------------------------------------ 几何
+    # ------------------------------------------------------------ geometry
     def monitors(self) -> List[Rect]:
         out: List[Rect] = []
 
@@ -258,19 +270,19 @@ class WindowsBackend(Backend):
             return True
 
         if not user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(cb), 0):
-            raise BackendError("EnumDisplayMonitors 失败, 拿不到显示器信息")
+            raise BackendError("EnumDisplayMonitors failed, no monitor information available")
         return out
 
     def desktop_rect(self) -> Rect:
         mons = self.monitors()
         if not mons:
-            raise BackendError("没有检测到显示器")
+            raise BackendError("no monitors detected")
         r = mons[0]
         for m in mons[1:]:
             r = r.union(m)
         return r
 
-    # ------------------------------------------------------------ 钩子
+    # ------------------------------------------------------------ hooks
     def start_capture(self, sink: SinkFn) -> None:
         if self._hook_thread is not None and self._hook_thread.is_alive():
             self._sink = sink
@@ -283,10 +295,10 @@ class WindowsBackend(Backend):
                                              name="crosspc-hook", daemon=True)
         self._hook_thread.start()
         if not self._ready.wait(5.0):
-            raise BackendError("安装键鼠钩子超时(可能被安全软件拦截)")
+            raise BackendError("timed out installing the keyboard/mouse hooks (security software may be blocking it)")
         if self._kbd_hook is None or self._mouse_hook is None:
-            raise BackendError(self._last_hook_error or "安装键鼠钩子失败")
-        self.log("已安装低层键鼠钩子(DPI: %s)" % (self._dpi or "?"))
+            raise BackendError(self._last_hook_error or "failed to install the keyboard/mouse hooks")
+        self.log("low-level keyboard/mouse hooks installed (DPI: %s)" % (self._dpi or "?"))
 
     _last_hook_error = ""
 
@@ -301,10 +313,10 @@ class WindowsBackend(Backend):
         thread.join(3.0)
         self._hook_thread = None
         self._hook_tid = 0
-        self.log("已卸载键鼠钩子")
+        self.log("keyboard/mouse hooks removed")
 
     def _hook_loop(self) -> None:
-        """专职线程: 装钩子 + 跑消息循环。"""
+        """Dedicated thread: install the hooks + run the message loop."""
         self._hook_tid = kernel32.GetCurrentThreadId()
         try:
             hmod = kernel32.GetModuleHandleW(None)
@@ -313,15 +325,16 @@ class WindowsBackend(Backend):
             self._kbd_hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL,
                                                       self._kbd_proc, hmod, 0)
             if not self._kbd_hook:
-                self._last_hook_error = ("SetWindowsHookEx(键盘) 失败: %s"
+                self._last_hook_error = ("SetWindowsHookEx (keyboard) failed: %s"
                                          % ctypes.WinError(ctypes.get_last_error()))
                 return
             self._mouse_hook = user32.SetWindowsHookExW(WH_MOUSE_LL,
                                                         self._mouse_proc, hmod, 0)
             if not self._mouse_hook:
-                self._last_hook_error = ("SetWindowsHookEx(鼠标) 失败: %s"
+                self._last_hook_error = ("SetWindowsHookEx (mouse) failed: %s"
                                          % ctypes.WinError(ctypes.get_last_error()))
-                # 鼠标钩子没装上就把键盘钩子也摘掉, 不留半拉子状态
+                # If the mouse hook did not install, remove the keyboard hook as
+                # well rather than leaving a half-installed state
                 user32.UnhookWindowsHookEx(self._kbd_hook)
                 self._kbd_hook = None
                 return
@@ -342,9 +355,9 @@ class WindowsBackend(Backend):
             user32.UnhookWindowsHookEx(self._mouse_hook)
             self._mouse_hook = None
 
-    # ------------------------------------------------------------ 钩子回调
+    # ------------------------------------------------------------ hook callbacks
     def _on_key_event(self, ncode, wparam, lparam) -> int:
-        """注意: 这个函数在低层钩子里被调用, 必须极快且不能抛异常。"""
+        """Careful: this function is called from inside a low-level hook, so it must be extremely fast and must never raise."""
         try:
             if ncode == HC_ACTION:
                 kb = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
@@ -401,20 +414,23 @@ class WindowsBackend(Backend):
         last = self._last_pt
         self._last_pt = (x, y)
         if injected:
-            # 我们自己 SetCursorPos 回中产生的伪事件: 只更新基准, 不算位移
+            # A fake event produced by our own SetCursorPos recenter: update the
+            # baseline only, it does not count as movement
             return
         if last is None:
             self._emit(Event.motion(x, y, 0, 0))
             return
         dx, dy = x - last[0], y - last[1]
         if abs(dx) > WARP_LIMIT or abs(dy) > WARP_LIMIT:
-            dx = dy = 0                    # 被别的程序直接 warp 了, 忽略这一跳
+            dx = dy = 0                    # warped directly by another program, ignore this jump
         self._emit(Event.motion(x, y, dx, dy))
         if self._forwarding and self._park is not None:
             px, py = self._park
             if (x, y) != (px, py):
-                # 先更新基准再移动光标: SetCursorPos 会同步触发一次注入事件,
-                # 那时 _last_pt 必须已经是停靠点, 否则会算出一大坨假位移。
+                # Update the baseline before moving the cursor: SetCursorPos fires
+                # an injected event synchronously, and by then _last_pt must
+                # already be the park point, or a huge fake delta would be
+                # computed.
                 self._last_pt = (px, py)
                 user32.SetCursorPos(px, py)
 
@@ -424,18 +440,18 @@ class WindowsBackend(Backend):
             sink(ev)
 
     def _fail_safe(self) -> None:
-        """钩子里出异常: 立刻放弃接管, 绝不把用户的键鼠吞死。"""
+        """An exception escaped a hook: drop the takeover at once and never swallow the user's keyboard and mouse for good."""
         if self._forwarding:
             self._forwarding = False
         self._sink = None
 
-    # ------------------------------------------------------------ 接管
+    # ------------------------------------------------------------ takeover
     def set_forwarding(self, on: bool) -> None:
         on = bool(on)
         if on and (self._hook_thread is None or not self._hook_thread.is_alive()):
-            raise BackendError("钩子未运行, 不能进入接管模式")
+            raise BackendError("hooks are not running, cannot enter takeover mode")
         if on and self._kbd_hook is None:
-            raise BackendError("密钥钩子未就绪, 不能进入接管模式")
+            raise BackendError("the keyboard hook is not ready, cannot enter takeover mode")
         if on:
             p = POINT()
             if user32.GetCursorPos(ctypes.byref(p)):
@@ -444,19 +460,19 @@ class WindowsBackend(Backend):
                     self._park = (p.x, p.y)
             self._forwarding = True
             self._start_watchdog()
-            self.log("进入接管模式: 本机键鼠将转发到远端")
+            self.log("entering takeover mode: local keyboard and mouse will be forwarded to the remote side")
         else:
             was = self._forwarding
             self._forwarding = False
             self._stop_watchdog()
             if was:
-                self.log("退出接管模式: 本机键鼠恢复")
+                self.log("leaving takeover mode: local keyboard and mouse restored")
 
     def set_park_point(self, x: int, y: int) -> None:
         self._park = (int(x), int(y))
         super().set_park_point(x, y)
 
-    # ------------------------------------------------------------ 看门狗
+    # ------------------------------------------------------------ watchdog
     def _start_watchdog(self) -> None:
         if self._watchdog is not None and self._watchdog.is_alive():
             return
@@ -469,12 +485,12 @@ class WindowsBackend(Backend):
         self._watchdog_stop.set()
 
     def _watchdog_loop(self) -> None:
-        """接管模式下盯着钩子线程; 它一旦死了立刻恢复本机输入。"""
+        """In takeover mode, keep an eye on the hook thread; the moment it dies, restore local input."""
         while not self._watchdog_stop.wait(0.5):
             if not self._forwarding:
                 return
             if self._hook_thread is None or not self._hook_thread.is_alive():
-                self.log("!! 钩子线程已退出, 紧急恢复本机键鼠")
+                self.log("!! hook thread exited, emergency restore of local keyboard and mouse")
                 self._forwarding = False
                 self._sink = None
                 return
@@ -483,11 +499,11 @@ class WindowsBackend(Backend):
         self._forwarding = False
         self._stop_watchdog()
 
-    # ------------------------------------------------------------ 光标
+    # ------------------------------------------------------------ cursor
     def cursor(self) -> Tuple[int, int]:
         p = POINT()
         if not user32.GetCursorPos(ctypes.byref(p)):
-            raise BackendError("GetCursorPos 失败")
+            raise BackendError("GetCursorPos failed")
         return p.x, p.y
 
     def set_cursor(self, x: int, y: int) -> None:
@@ -495,16 +511,18 @@ class WindowsBackend(Backend):
         if not user32.SetCursorPos(int(x), int(y)):
             self._last_pt = None
 
-    # ------------------------------------------------------------ 注入
+    # ------------------------------------------------------------ injection
     def _send(self, inp: INPUT) -> None:
         n = user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
         if n != 1:
-            # 常见于 UIPI 拦截(目标窗口权限更高, 例如以管理员身份运行的程序),
-            # 只提示一次, 不然 1000Hz 的鼠标会把日志刷爆
+            # Usually UIPI blocking it (the target window has higher privileges,
+            # e.g. a program running as administrator). Warn only once, otherwise
+            # a 1000 Hz mouse would flood the log
             self._send_failures += 1
             if self._send_failures == 1:
-                self.log("SendInput 被拒绝 (错误码 %d); 若目标是管理员窗口, "
-                         "需要以管理员身份运行 CrossPC" % ctypes.get_last_error())
+                self.log("SendInput was rejected (error code %d); if the target is "
+                         "an elevated window, CrossPC must be run as administrator"
+                         % ctypes.get_last_error())
 
     def _mouse_input(self, flags: int, dx: int = 0, dy: int = 0,
                      data: int = 0) -> INPUT:
@@ -525,7 +543,7 @@ class WindowsBackend(Backend):
         }
         pair = table.get(button)
         if pair is None:
-            self.log("忽略未知鼠标键: %r" % (button,))
+            self.log("ignoring unknown mouse button: %r" % (button,))
             return
         flags = pair[0] if pressed else pair[1]
         data = 0
@@ -545,7 +563,7 @@ class WindowsBackend(Backend):
                    extended: bool = False) -> None:
         up = 0 if pressed else KEYEVENTF_KEYUP
         if vk == VK_PAUSE or not scancode:
-            # Pause 以及拿不到扫描码的键: 退回虚拟键码方式
+            # Pause, and keys whose scancode is unavailable: fall back to the virtual-key code
             ki = KEYBDINPUT(vk & 0xFFFF, 0, up, 0, 0)
         else:
             flags = KEYEVENTF_SCANCODE | up
@@ -554,16 +572,16 @@ class WindowsBackend(Backend):
             ki = KEYBDINPUT(0, scancode & 0xFFFF, flags, 0, 0)
         self._send(INPUT(type=INPUT_KEYBOARD, u=_INPUTUNION(ki=ki)))
 
-    # ------------------------------------------------------------ 剪辑板
+    # ------------------------------------------------------------ clipboard
     def _open_clipboard(self, tries: int = 10, delay: float = 0.02) -> bool:
         for _ in range(tries):
             if user32.OpenClipboard(None):
                 return True
-            time.sleep(delay)              # 剪辑板常被别人占着, 值得重试
+            time.sleep(delay)              # the clipboard is often held by someone else, worth retrying
         return False
 
     def _get_clipboard_bytes(self, fmt: int) -> Optional[bytes]:
-        """读一个"内存块(HGLOBAL)"类型的剪辑板格式, 返回原始字节。"""
+        """Read a clipboard format that is a "memory block (HGLOBAL)" and return the raw bytes."""
         handle = user32.GetClipboardData(fmt)
         if not handle:
             return None
@@ -579,20 +597,20 @@ class WindowsBackend(Backend):
             kernel32.GlobalUnlock(handle)
 
     def _set_clipboard_bytes(self, fmt: int, data: bytes) -> None:
-        """写一个"内存块"格式。剪辑板必须已经被 OpenClipboard + EmptyClipboard。"""
+        """Write a "memory block" format. The clipboard must already have been opened with OpenClipboard + EmptyClipboard."""
         handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
         if not handle:
-            raise BackendError("GlobalAlloc 失败(%d 字节)" % len(data))
+            raise BackendError("GlobalAlloc failed (%d bytes)" % len(data))
         ptr = kernel32.GlobalLock(handle)
         if not ptr:
             kernel32.GlobalFree(handle)
-            raise BackendError("GlobalLock 失败")
+            raise BackendError("GlobalLock failed")
         ctypes.memmove(ptr, data, len(data))
         kernel32.GlobalUnlock(handle)
         if not user32.SetClipboardData(fmt, handle):
             kernel32.GlobalFree(handle)
-            raise BackendError("SetClipboardData(格式 %d) 失败" % fmt)
-        # 成功后内存所有权归系统, 不能再 free
+            raise BackendError("SetClipboardData (format %d) failed" % fmt)
+        # After success the memory is owned by the system and must not be freed again
 
     def clipboard_text(self) -> Optional[str]:
         if not self._open_clipboard():
@@ -613,10 +631,10 @@ class WindowsBackend(Backend):
 
     def set_clipboard_text(self, text: str) -> None:
         if not self._open_clipboard():
-            raise BackendError("打不开剪辑板(被其它程序占用)")
+            raise BackendError("cannot open the clipboard (another program is holding it)")
         try:
             if not user32.EmptyClipboard():
-                raise BackendError("EmptyClipboard 失败")
+                raise BackendError("EmptyClipboard failed")
             self._set_clipboard_bytes(CF_UNICODETEXT,
                                       text.encode("utf-16-le") + b"\x00\x00")
         finally:
@@ -627,7 +645,7 @@ class WindowsBackend(Backend):
         return int(seq)
 
     def clipboard_formats(self) -> List[str]:
-        """列出剪辑板里现在有哪些格式(诊断用, 只读)。"""
+        """List which formats the clipboard currently holds (diagnostics only, read-only)."""
         out: List[str] = []
         if not self._open_clipboard():
             return out
@@ -637,7 +655,7 @@ class WindowsBackend(Backend):
                 fmt = int(user32.EnumClipboardFormats(fmt))
                 if not fmt:
                     break
-                if fmt >= 0xC000:                      # 注册格式: 有名字
+                if fmt >= 0xC000:                      # registered format: it has a name
                     buf = ctypes.create_unicode_buffer(128)
                     if user32.GetClipboardFormatNameW(fmt, buf, 128):
                         out.append(buf.value)
@@ -650,25 +668,27 @@ class WindowsBackend(Backend):
             user32.CloseClipboard()
         return out
 
-    # ------------------------------------------------------------ 剪辑板图片
+    # ------------------------------------------------------------ clipboard images
     @property
     def supports_clipboard_images(self) -> bool:
         return True
 
     def _png_format_id(self) -> int:
-        """Windows 上 "PNG" 是注册格式(不是 CF_ 常量), 要先查一次它的编号。"""
+        """On Windows "PNG" is a registered format (not a CF_ constant), so its id has to be looked up once first."""
         if self._png_fmt is None:
             self._png_fmt = int(user32.RegisterClipboardFormatW("PNG") or 0)
             if not self._png_fmt:
-                self.log("注册 PNG 剪辑板格式失败, 图片只能走 DIB")
+                self.log("failed to register the PNG clipboard format, images can only go through DIB")
         return self._png_fmt
 
     def clipboard_image_png(self, max_bytes: int = 0) -> Optional[bytes]:
-        """读剪辑板图片 -> PNG 字节。
+        """Read the clipboard image -> PNG bytes.
 
-        顺序: 注册格式 "PNG" -> CF_DIBV5 -> CF_DIB。
-        先看 PNG 是因为它无损且保留 alpha; 有些程序只给 DIB(系统截图就是),
-        那就地转成 PNG。转换失败会退回下一个候选, 不会整条失败。
+        Order: registered format "PNG" -> CF_DIBV5 -> CF_DIB.
+        PNG comes first because it is lossless and keeps alpha; some programs only
+        offer DIB (the system screenshot tool does), so that is converted to PNG
+        in place. A failed conversion falls back to the next candidate instead of
+        failing the whole thing.
         """
         if not self._open_clipboard():
             return None
@@ -678,7 +698,7 @@ class WindowsBackend(Backend):
                 data = self._get_clipboard_bytes(fmt)
                 if data and data[:8] == PNG_SIG:
                     if max_bytes and len(data) > max_bytes:
-                        self.log("剪辑板图片 %d 字节, 超过上限 %d, 不同步"
+                        self.log("clipboard image is %d bytes, over the cap of %d, not syncing"
                                  % (len(data), max_bytes))
                         return None
                     return data
@@ -691,10 +711,10 @@ class WindowsBackend(Backend):
                 try:
                     png = png_from_dib(dib, pixel_cap=self.image_pixel_cap)
                 except ImageError as exc:
-                    self.log("剪辑板里的 DIB 转 PNG 失败(%s), 试下一种格式" % exc)
+                    self.log("converting the DIB on the clipboard to PNG failed (%s), trying the next format" % exc)
                     continue
                 if max_bytes and len(png) > max_bytes:
-                    self.log("剪辑板图片转成 PNG 后 %d 字节, 超过上限 %d, 不同步"
+                    self.log("clipboard image is %d bytes once converted to PNG, over the cap of %d, not syncing"
                              % (len(png), max_bytes))
                     return None
                 return png
@@ -703,93 +723,95 @@ class WindowsBackend(Backend):
             user32.CloseClipboard()
 
     def set_clipboard_image_png(self, png: bytes) -> None:
-        """把 PNG 写进剪辑板: 同时提供注册格式 "PNG" 和 CF_DIB。
+        """Write a PNG into the clipboard: offer both the registered format "PNG" and CF_DIB.
 
-        为什么要写两份: 现代程序(浏览器/Office/新版画图)直接吃 PNG(无损、带
-        alpha), 而老程序只认 DIB。只写 PNG 会让一部分程序粘贴变灰, 只写 DIB
-        会丢透明度, 所以两个都给。
+        Why write it twice: modern programs (browsers/Office/the new Paint) take
+        PNG directly (lossless, with alpha), while old programs only understand
+        DIB. Writing PNG alone greys out pasting in some programs, and writing DIB
+        alone loses transparency, so both are provided.
         """
         if not png:
-            raise BackendError("图片内容为空")
+            raise BackendError("the image is empty")
         if not self._open_clipboard():
-            raise BackendError("打不开剪辑板(被其它程序占用)")
+            raise BackendError("cannot open the clipboard (another program is holding it)")
         wrote = 0
         try:
             if not user32.EmptyClipboard():
-                raise BackendError("EmptyClipboard 失败")
+                raise BackendError("EmptyClipboard failed")
             fmt = self._png_format_id()
             if fmt:
                 try:
                     self._set_clipboard_bytes(fmt, png)
                     wrote += 1
                 except BackendError as exc:
-                    self.log("写 PNG 格式失败: %s" % exc)
+                    self.log("writing the PNG format failed: %s" % exc)
             try:
                 dib = dib_from_png(png, pixel_cap=self.image_pixel_cap)
             except ImageError as exc:
-                self.log("这张 PNG 解不开(%s), 只提供 PNG 格式; "
-                         "老程序可能粘贴不了" % exc)
+                self.log("this PNG cannot be decoded (%s), only the PNG format is "
+                         "offered; old programs may not be able to paste it" % exc)
                 dib = None
             if dib is not None:
                 try:
                     self._set_clipboard_bytes(CF_DIB, dib)
                     wrote += 1
                 except BackendError as exc:
-                    self.log("写 DIB 格式失败: %s" % exc)
+                    self.log("writing the DIB format failed: %s" % exc)
             if not wrote:
-                raise BackendError("图片写剪辑板失败(PNG 与 DIB 都没成功)")
+                raise BackendError("failed to write the image to the clipboard (neither PNG nor DIB succeeded)")
         finally:
             user32.CloseClipboard()
 
-    # ------------------------------------------------------------ 自检
+    # ------------------------------------------------------------ self-check
     def probe(self) -> List[Tuple[str, bool, str]]:
         out: List[Tuple[str, bool, str]] = []
         try:
             mons = self.monitors()
             dr = self.desktop_rect()
-            out.append(("显示器", True, "%d 个, 虚拟桌面 %s" % (len(mons), dr)))
+            out.append(("monitors", True, "%d of them, virtual desktop %s" % (len(mons), dr)))
         except Exception as exc:
-            out.append(("显示器", False, str(exc)))
-        out.append(("DPI 感知", True, self._dpi or _enable_dpi_awareness()))
-        # 真装一次钩子再卸掉: 能装说明捕获/抑制可用(不吞任何键, 安全)
+            out.append(("monitors", False, str(exc)))
+        out.append(("DPI awareness", True, self._dpi or _enable_dpi_awareness()))
+        # Really install the hooks once and then remove them: if they install,
+        # capture/suppress is available (no key is suppressed, so it is safe)
         try:
             ok, detail = self._probe_hooks()
-            out.append(("键鼠钩子", ok, detail))
+            out.append(("keyboard/mouse hooks", ok, detail))
         except Exception as exc:
-            out.append(("键鼠钩子", False, "探测失败: %s" % exc))
-        # 注入能力: 只查符号, 不动真实光标
-        out.append(("SendInput 注入", bool(user32.SendInput), "可用"))
+            out.append(("keyboard/mouse hooks", False, "probe failed: %s" % exc))
+        # Injection capability: only check the symbol, do not touch the real cursor
+        out.append(("SendInput injection", bool(user32.SendInput), "available"))
         try:
             p = self.cursor()
-            out.append(("光标读取", True, "当前位置 %d,%d" % p))
+            out.append(("cursor read", True, "current position %d,%d" % p))
         except Exception as exc:
-            out.append(("光标读取", False, str(exc)))
+            out.append(("cursor read", False, str(exc)))
         try:
             txt = self.clipboard_text()
-            out.append(("剪辑板", txt is not None,
-                        "读到 %d 个字符" % len(txt) if txt else "当前为空/不可读"))
+            out.append(("clipboard", txt is not None,
+                        "read %d characters" % len(txt) if txt else "empty/unreadable right now"))
         except Exception as exc:
-            out.append(("剪辑板", False, str(exc)))
+            out.append(("clipboard", False, str(exc)))
         try:
             fmts = self.clipboard_formats()
             has_image = any(f in ("CF_DIB", "CF_DIBV5", "PNG") for f in fmts)
-            out.append(("图片剪辑板", True,
-                        "支持 CF_DIB/CF_DIBV5/PNG; 当前剪辑板格式: %s%s"
-                        % (", ".join(fmts) or "(读不到)",
-                           "(含图片)" if has_image else "")))
+            out.append(("image clipboard", True,
+                        "CF_DIB/CF_DIBV5/PNG supported; current clipboard formats: %s%s"
+                        % (", ".join(fmts) or "(unreadable)",
+                           " (contains an image)" if has_image else "")))
         except Exception as exc:
-            out.append(("图片剪辑板", False, "查询失败: %s" % exc))
+            out.append(("image clipboard", False, "query failed: %s" % exc))
         return out
 
     def _probe_hooks(self) -> Tuple[bool, str]:
-        """在临时线程里装一次低层钩子, 立刻卸载。"""
+        """Install the low-level hooks once on a temporary thread, then remove them right away."""
         state = {"kbd": None, "mouse": None, "err": "", "ready": threading.Event()}
 
         def loop():
             hmod = kernel32.GetModuleHandleW(None)
             kp = HOOKPROC(lambda n, w, l: user32.CallNextHookEx(None, n, w, l))
             mp = HOOKPROC(lambda n, w, l: user32.CallNextHookEx(None, n, w, l))
-            state["kp"], state["mp"] = kp, mp          # 保持引用防 GC
+            state["kp"], state["mp"] = kp, mp          # keep the references alive against GC
             state["kbd"] = user32.SetWindowsHookExW(WH_KEYBOARD_LL, kp, hmod, 0)
             state["mouse"] = user32.SetWindowsHookExW(WH_MOUSE_LL, mp, hmod, 0)
             if not state["kbd"] or not state["mouse"]:
@@ -806,7 +828,7 @@ class WindowsBackend(Backend):
         state["ready"].wait(3.0)
         t.join(2.0)
         if state["kbd"] and state["mouse"]:
-            return True, "可安装/可卸载, 捕获与接管均可用"
+            return True, "can install/uninstall, both capture and takeover are available"
         win = (kernel32.GetConsoleWindow() != 0)
-        extra = "" if win else " (无控制台时也可能装不上)"
-        return False, "安装失败: %s%s" % (state["err"] or "未知原因", extra)
+        extra = "" if win else " (it may also fail to install without a console)"
+        return False, "installation failed: %s%s" % (state["err"] or "unknown reason", extra)

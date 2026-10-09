@@ -1,21 +1,28 @@
-"""虚拟桌面几何模型。
+"""Virtual desktop geometry model.
 
-CrossPC 把所有参与共享的屏幕放在同一个"虚拟坐标系"里:
+CrossPC puts every screen that takes part in the share into one "virtual
+coordinate system":
 
-        (0,0)                        server 的虚拟桌面(可能多显示器)
+        (0,0)                        the server's virtual desktop (may be multi-monitor)
         +---------------------------+
         |          server           |            +---------------------+
         |      (1920 x 1080)        |  ------>   |  client "debian"    |
         +---------------------------+            |  rect=(1920,0,2560,1440)
                                                  +---------------------+
 
-* server 的矩形固定放在 (0,0), 尺寸 = 它自己的虚拟桌面尺寸;
-* 每个 client 有一个矩形, 由"相对位置设置"界面拖出来(或直接写配置);
-* 鼠标在虚拟坐标里移动, 落在哪个矩形里就由哪台机器处理 —— 这就是
-  "鼠标移到屏幕边缘继续移动就跑到另一台电脑"的全部原理;
-* 矩形之间留缝隙也不会丢光标: resolve() 会把光标吸附到最近的矩形边缘。
+* the server rectangle is pinned at (0,0), and its size = the server's own
+  virtual desktop size;
+* every client has a rectangle, dragged out in the "relative position" UI (or
+  written straight into the config);
+* the mouse moves in virtual coordinates, and whichever rectangle it lands in
+  is the machine that handles it -- that is the entire principle behind "move
+  the mouse to the edge of the screen, keep moving, and it ends up on the other
+  PC";
+* gaps between rectangles do not lose the cursor either: resolve() snaps the
+  cursor to the edge of the nearest rectangle.
 
-本模块是纯计算, 不依赖任何平台, 因此可以完全用单元测试覆盖。
+This module is pure computation and depends on no platform, so unit tests can
+cover it completely.
 """
 from __future__ import annotations
 
@@ -25,20 +32,20 @@ from typing import Dict, Iterable, List, Optional, Tuple
 ROLE_SERVER = "server"
 ROLE_CLIENT = "client"
 
-# 边缘方向
+# edge directions
 LEFT, RIGHT, TOP, BOTTOM = "left", "right", "top", "bottom"
 
 
 @dataclass(frozen=True)
 class Rect:
-    """屏幕矩形。x/y 是虚拟坐标系里的左上角, 单位物理像素。"""
+    """Screen rectangle. x/y is the top-left corner in virtual coordinates, in physical pixels."""
 
     x: int = 0
     y: int = 0
     w: int = 0
     h: int = 0
 
-    # ------------------------------------------------------------ 边界属性
+    # ------------------------------------------------------------ edge properties
     @property
     def left(self) -> int:
         return self.x
@@ -60,20 +67,23 @@ class Rect:
         return (self.x + self.w // 2, self.y + self.h // 2)
 
     def contains(self, px: int, py: int) -> bool:
-        """半开区间判定, 保证相邻矩形不会同时命中同一个点。"""
+        """Half-open interval test, so adjacent rectangles never both claim the same point."""
         return self.x <= px < self.right and self.y <= py < self.bottom
 
     def clamp(self, px: int, py: int) -> Tuple[int, int]:
-        """把**虚拟坐标**的点夹到矩形内(闭区间, 最右下角是 right-1/bottom-1)。"""
+        """Clamp a **virtual coordinate** point into the rectangle (closed interval, the bottom-right corner is right-1/bottom-1)."""
         cx = min(max(px, self.x), max(self.x, self.right - 1))
         cy = min(max(py, self.y), max(self.y, self.bottom - 1))
         return cx, cy
 
     def clamp_local(self, lx: int, ly: int) -> Tuple[int, int]:
-        """把**本机坐标**(左上角为 0,0)的点夹到 0..w-1 / 0..h-1。
+        """Clamp a **local coordinate** point (top-left is 0,0) into 0..w-1 / 0..h-1.
 
-        和 clamp() 的区别很容易搞混, 所以单独一个方法: 坐标一旦是"相对本机
-        屏幕左上角"的, 就必须用这个, 否则会被顶到矩形在虚拟桌面里的位置上去。
+        The difference from clamp() is very easy to get wrong, so it lives in a
+        method of its own: as soon as the coordinates are "relative to the
+        top-left corner of the local screen", this one must be used, otherwise
+        the point gets pushed to wherever the rectangle sits in the virtual
+        desktop.
         """
         cx = min(max(lx, 0), max(self.w - 1, 0))
         cy = min(max(ly, 0), max(self.h - 1, 0))
@@ -84,7 +94,7 @@ class Rect:
         return ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
 
     def edge_at(self, px: int, py: int) -> Optional[str]:
-        """点贴在该矩形的哪条边上(用于判断"想从哪边穿出去")。"""
+        """Which edge of this rectangle the point is against (used to tell "which way it wants to cross out")."""
         if not (self.x <= px < self.right and self.y <= py < self.bottom):
             return None
         if px <= self.x:
@@ -98,7 +108,7 @@ class Rect:
         return None
 
     def touches(self, other: "Rect") -> Optional[str]:
-        """本矩形相对 other 的贴边方向(共边或重叠即算贴住)。"""
+        """The edge direction of this rectangle relative to other (sharing an edge or overlapping counts as touching)."""
         if self.right <= other.left and self.bottom > other.top and self.y < other.bottom:
             return LEFT
         if self.left >= other.right and self.bottom > other.top and self.y < other.bottom:
@@ -123,7 +133,7 @@ class Rect:
             return default if default is not None else Rect()
         if isinstance(d, (list, tuple)):
             if len(d) != 4:
-                raise ValueError("矩形要 4 个数 [x,y,w,h], 收到 %r" % (d,))
+                raise ValueError("a rect needs 4 numbers [x,y,w,h], got %r" % (d,))
             return Rect(*(int(v) for v in d))
         return Rect(int(d.get("x", 0)), int(d.get("y", 0)),
                     int(d.get("w", 0)), int(d.get("h", 0)))
@@ -134,36 +144,36 @@ class Rect:
 
 @dataclass
 class Machine:
-    """一台参与共享的机器。"""
+    """One machine taking part in the share."""
 
     name: str
     role: str
     rect: Rect
-    host: str = ""                       # client 用: server 地址
+    host: str = ""                       # for a client: the server address
     port: int = 0
-    monitors: List[Rect] = field(default_factory=list)  # 该机自己的显示器布局
+    monitors: List[Rect] = field(default_factory=list)  # that machine's own monitor layout
 
     @property
     def is_server(self) -> bool:
         return self.role == ROLE_SERVER
 
     def local_to_virtual(self, lx: int, ly: int) -> Tuple[int, int]:
-        """该机桌面坐标 -> 虚拟坐标。"""
+        """That machine's desktop coordinates -> virtual coordinates."""
         return self.rect.x + lx, self.rect.y + ly
 
     def virtual_to_local(self, vx: int, vy: int) -> Tuple[int, int]:
-        """虚拟坐标 -> 该机桌面坐标。"""
+        """Virtual coordinates -> that machine's desktop coordinates."""
         return vx - self.rect.x, vy - self.rect.y
 
 
 class Layout:
-    """整张虚拟桌面的布局。server 一个 + client 若干。"""
+    """The layout of the whole virtual desktop. One server plus any number of clients."""
 
     def __init__(self, server: Machine, clients: Iterable[Machine] = ()):
         self.server = server
         self.clients: List[Machine] = list(clients)
 
-    # ------------------------------------------------------------ 查询
+    # ------------------------------------------------------------ queries
     @property
     def machines(self) -> List[Machine]:
         return [self.server] + self.clients
@@ -181,7 +191,7 @@ class Layout:
         return r
 
     def machine_at(self, vx: int, vy: int) -> Optional[Machine]:
-        """严格命中测试: 虚拟坐标落在哪个矩形里。"""
+        """Strict hit test: which rectangle the virtual coordinates fall into."""
         for m in self.machines:
             if m.rect.contains(vx, vy):
                 return m
@@ -189,10 +199,12 @@ class Layout:
 
     def resolve(self, vx: int, vy: int, prefer: Optional[Machine] = None
                 ) -> Tuple[Machine, int, int, bool]:
-        """把虚拟坐标解析成 (机器, 该机本地坐标, 是否被吸附回矩形内)。
+        """Resolve virtual coordinates into (machine, local coordinates on it,
+        whether it had to be snapped back inside a rectangle).
 
-        落在矩形之间的缝隙时, 吸附到最近的矩形, 光标永远不会"丢"。
-        prefer 用于平局时优先保持当前机器, 避免在接缝处来回抖动。
+        When the point falls into a gap between rectangles it snaps to the
+        nearest rectangle, so the cursor is never "lost". prefer keeps the
+        current machine on a tie, avoiding jitter back and forth at a seam.
         """
         hit = self.machine_at(vx, vy)
         if hit is not None:
@@ -204,7 +216,7 @@ class Layout:
         for m in self.machines:
             d = m.rect.distance_to(vx, vy)
             if prefer is not None and m is prefer:
-                d -= 2.0          # 2 像素迟滞: 缝隙正中间时不要来回抖
+                d -= 2.0          # 2-pixel hysteresis: do not jitter right in the middle of a gap
             if best_d is None or d < best_d:
                 best, best_d = m, d
         assert best is not None
@@ -212,12 +224,14 @@ class Layout:
         lx, ly = best.virtual_to_local(lx, ly)
         return best, lx, ly, True
 
-    # ------------------------------------------------------------ 边缘判断
+    # ------------------------------------------------------------ edge decisions
     def exit_direction(self, machine: Machine, dx: int, dy: int,
                        lx: int, ly: int) -> Optional[str]:
-        """在 machine 上, 光标贴边且继续往外推时, 返回推出的方向。
+        """On machine, when the cursor is against an edge and keeps being pushed
+        outwards, return the direction it is pushed towards.
 
-        lx/ly 是 machine 的本地坐标, dx/dy 是本次物理位移。
+        lx/ly are local coordinates on machine, dx/dy is the physical delta for
+        this event.
         """
         r = machine.rect
         vx, vy = machine.local_to_virtual(lx, ly)
@@ -236,12 +250,15 @@ class Layout:
 
     def neighbour(self, machine: Machine, direction: str,
                   lx: int, ly: int, tolerance: int = 128) -> Optional[Machine]:
-        """从 machine 沿 direction 出去, 会落到哪台机器上(可能没有)。
+        """Going out of machine along direction, which machine would we land on
+        (possibly none).
 
-        先按"紧贴"探测; 配置里手写坐标时很容易差几个像素(或者故意留条缝),
-        所以逐步放宽搜索距离到 tolerance 像素 —— 否则会出现"鼠标顶到边上
-        就是过不去"这种非常难查的问题。界面里拖出来的位置是自动吸附的,
-        正常 gap 为 0。
+        We probe for a perfect touch first; hand-written coordinates in the
+        config are easily a few pixels off (or deliberately leave a gap), so the
+        search distance is relaxed step by step up to tolerance pixels --
+        otherwise "the mouse reaches the edge and simply cannot get through"
+        turns into a very hard-to-diagnose problem. Positions dragged out in the
+        UI are snapped automatically, so a normal gap is 0.
         """
         vx, vy = machine.local_to_virtual(lx, ly)
         if direction == LEFT:
@@ -261,7 +278,7 @@ class Layout:
         return None
 
     def describe(self) -> str:
-        lines = ["虚拟桌面 %s" % self.bounds()]
+        lines = ["virtual desktop %s" % self.bounds()]
         for m in self.machines:
             tag = "server" if m.is_server else ("client@%s:%d" % (m.host, m.port)
                                                 if m.host else "client")
@@ -270,10 +287,12 @@ class Layout:
 
 
 def relative_direction(old: Rect, new: Rect) -> str:
-    """new 在 old 的哪一侧(取中心连线的主轴)。
+    """Which side of old new is on (the dominant axis of the line between their
+    centers).
 
-    用于"控制权换机器"时决定从哪条边进入新机器。完全重叠/对角线布局时取
-    位移更大的那个轴, 结果稳定且符合直觉。
+    Used when control changes machines, to decide which edge to enter the new
+    machine from. With a fully overlapping or diagonal layout it takes the axis
+    with the larger offset, which is both stable and intuitive.
     """
     dx = (new.x + new.w // 2) - (old.x + old.w // 2)
     dy = (new.y + new.h // 2) - (old.y + old.h // 2)
@@ -284,7 +303,7 @@ def relative_direction(old: Rect, new: Rect) -> str:
 
 def make_server(name: str, w: int, h: int,
                 monitors: Optional[List[Rect]] = None) -> Machine:
-    """server 的矩形: 本机虚拟桌面, 左上角归一到 (0,0)。"""
+    """The server rectangle: the local virtual desktop, normalized so the top-left corner is (0,0)."""
     return Machine(name=name, role=ROLE_SERVER, rect=Rect(0, 0, w, h),
                    monitors=list(monitors or []))
 

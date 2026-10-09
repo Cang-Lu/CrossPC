@@ -1,9 +1,11 @@
-"""CrossPC 测试包。
+"""CrossPC test package.
 
-存在的唯一理由: `python -m unittest discover -s tests -t <项目根>` 要求
-start 目录是一个"可导入的"目录(unittest.loader 会 import 它)。没有这个
-文件时 Python 只把它当 namespace package, 某些 Python 版本/布局下
-discover 会直接报 "Start directory is not importable"。
+It exists for one reason only: `python -m unittest discover -s tests -t <project
+root>` requires the start directory to be an "importable" directory
+(unittest.loader will import it). Without this file Python treats it merely as a
+namespace package, and on some Python versions/layouts discover fails outright
+with "Start directory is not importable".
 
-测试本身不依赖任何第三方库(不用 pytest), 所以这个包是空的。
+The tests themselves depend on no third-party library (no pytest), so this
+package is empty.
 """

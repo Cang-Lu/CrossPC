@@ -1,7 +1,8 @@
-"""后端工厂: 按平台挑选实现。
+"""Backend factory: pick an implementation per platform.
 
-导入一律延迟到函数内部, 这样在 Linux 上 import 本模块不会碰到 ctypes.windll,
-反之亦然; 也方便测试时替换成 FakeBackend。
+Imports are always deferred into the function bodies, so importing this module on
+Linux never touches ctypes.windll and vice versa; it also makes it easy to swap in
+FakeBackend from tests.
 """
 from __future__ import annotations
 
@@ -29,9 +30,9 @@ def _detect_display_server() -> str:
 
 
 def get_backend(log: Optional[LogFn] = None, prefer: Optional[str] = None) -> Backend:
-    """创建当前平台可用的后端。
+    """Create a backend that is usable on the current platform.
 
-    prefer: 强制指定实现, 例如 "windows" / "x11" / "uinput" / "fake"。
+    prefer: force a specific implementation, e.g. "windows" / "x11" / "uinput" / "fake".
     """
     plat = sys.platform
     want = prefer or (_detect_display_server() if plat.startswith("linux") else plat)
@@ -48,7 +49,7 @@ def get_backend(log: Optional[LogFn] = None, prefer: Optional[str] = None) -> Ba
         from .linux import LinuxBackend
         return LinuxBackend(log=log, prefer=prefer)
 
-    raise BackendError("暂不支持的平台: %s (目前支持 Windows 与 Linux)" % plat)
+    raise BackendError("unsupported platform: %s (only Windows and Linux are supported for now)" % plat)
 
 
 def platform_summary() -> str:

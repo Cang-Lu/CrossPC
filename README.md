@@ -1,193 +1,212 @@
-# CrossPC —— 局域网内共享一套鼠标键盘
+# CrossPC - share one keyboard and mouse across your LAN
+
+**English** | [Chinese](README.zh-CN.md)
 
 [![CI](https://github.com/Cang-Lu/CrossPC/actions/workflows/ci.yml/badge.svg)](https://github.com/Cang-Lu/CrossPC/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-两台电脑（一台 Windows 接了键鼠，一台 Debian 没接），**鼠标从这台屏幕的边缘推出去，
-就跑到另一台屏幕上继续用**；键盘跟着鼠标走；两边的复制粘贴内容也能互相同步。
+Two computers (one Windows machine with the keyboard and mouse attached, one Debian
+machine without), **push the mouse past the edge of one screen and it carries on across
+the other one**; the keyboard follows the mouse; copy/paste content syncs both ways.
 
-界面上把两台机器的方框拖成"左右相邻"或"上下相邻"，就完成全部配置。
+All the setup you need is dragging the two machine boxes next to each other - either
+side by side or stacked - in the GUI.
 
 ```
-        Windows(server, 接了键鼠)                Debian(client, 没键鼠)
+        Windows(server, keyboard+mouse)          Debian(client, no keyboard/mouse)
    ┌──────────────────────────────┐        ┌───────────────────────────┐
    │                              │        │                           │
    │        1920 x 1080           │  ───►  │       2560 x 1440         │
    │                              │        │                           │
    └──────────────────────────────┘        └───────────────────────────┘
-        鼠标推到右边缘继续推 → 光标出现在 Debian 的左边线上 → 键盘也跟着过去
-        从 Debian 左边再往回推 → 光标回到 Windows 原来的位置(按键自动抬起)
+        keep pushing past the right edge → the cursor appears on Debian's left edge → the keyboard follows
+        push back in from Debian's left edge → the cursor returns to where it was on Windows (held keys are released)
 ```
 
 ---
 
-## 目录
+## Table of contents
 
-- [特性](#特性)
-- [它是怎么工作的](#它是怎么工作的)
-- [快速开始](#快速开始)
-- [安装](#安装)
-- [日常使用](#日常使用)
-- [配置文件](#配置文件)
-- [命令行参考](#命令行参考)
-- [排错](#排错)
-- [已知限制（请务必看一遍）](#已知限制请务必看一遍)
-- [安全性说明](#安全性说明)
-- [项目结构与开发](#项目结构与开发)
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Quick start](#quick-start)
+- [Installation](#installation)
+- [Everyday use](#everyday-use)
+- [Configuration file](#configuration-file)
+- [Command-line reference](#command-line-reference)
+- [Troubleshooting](#troubleshooting)
+- [Known limitations (please read this once)](#known-limitations-please-read-this-once)
+- [Security notes](#security-notes)
+- [Project layout and development](#project-layout-and-development)
 
 ---
 
-## 特性
+## Features
 
-| 能力 | 说明 |
+| Capability | Description |
 |---|---|
-| 屏幕相对位置可配 | 图形界面里拖方框，自动吸附成无缝拼接；也支持直接写 JSON |
-| 边缘穿越 | 鼠标顶到边缘继续推就切到另一台；回来时回到原来的位置 |
-| 键鼠转发 | 用**扫描码**转发，两端键盘布局不同也不会串键 |
-| 剪贴板双向同步 | 纯文本 **+ 图片（截图）**，双向往返自动防回环 |
-| 防粘键 | 切换机器 / 断线 / 退出时，自动把按住的键全部抬起 |
-| 紧急收回 | `Ctrl+Alt+F12` 无条件把控制权收回本机 |
-| 锁定模式 | `Ctrl+Alt+L` 锁在当前机器，鼠标顶到边缘也不切走 |
-| 自动发现 | client 不填 IP 也能用 UDP 广播找到 server（手写 IP 永远更可靠） |
-| 配置热加载 | server 运行中改完位置直接生效，不用重启 |
-| 自检工具 | `doctor` / `selftest` / `capturetest` / `injecttest` / `clipboardtest`，出问题先跑它们 |
-| 零第三方依赖 | 只用 Python 标准库（Windows 走 ctypes 调 user32，Linux 走 ctypes 调 libX11 / uinput，图片的 DIB↔PNG 编解码也是自己写的） |
+| Configurable screen arrangement | Drag the boxes in the GUI and they snap together seamlessly; editing JSON directly works too |
+| Crossing the edge | Push the mouse against an edge and keep pushing to switch to the other machine; coming back lands on the original position |
+| Keyboard and mouse forwarding | Events are forwarded as **scancodes**, so different keyboard layouts on the two ends never scramble keys |
+| Two-way clipboard sync | Plain text **+ images (screenshots)**, both directions, with automatic loop prevention |
+| Stuck-key protection | Switching machines / losing the link / quitting releases every key that was held down |
+| Panic release | `Ctrl+Alt+F12` unconditionally pulls control back to the local machine |
+| Lock mode | `Ctrl+Alt+L` keeps control on the current machine even when the mouse hits an edge |
+| Automatic discovery | The client works without an IP by finding the server over a UDP broadcast (typing the IP by hand is always more reliable) |
+| Hot config reload | Change the arrangement while the server is running and it takes effect without a restart |
+| Self-check tools | `doctor` / `selftest` / `capturetest` / `injecttest` / `clipboardtest` - run them first when something misbehaves |
+| Zero third-party dependencies | Python standard library only (Windows calls user32 through ctypes, Linux calls libX11 / uinput through ctypes, and the DIB↔PNG image codec is hand-written too) |
 
 ---
 
-## 它是怎么工作的
+## How it works
 
-角色是按你的场景定的：**接了物理键鼠的那台 = server，另一台 = client**。
+The roles come from your setup: **the machine with the physical keyboard and mouse = server, the other one = client**.
 
-**server（Windows）**
+**server (Windows)**
 
-- 用两个低层钩子（`WH_KEYBOARD_LL` / `WH_MOUSE_LL`）观察全局输入。
-  没接管时只"顺便看一眼"，输入照常送到本机，你完全感觉不到它存在。
-- 接管时钩子返回 1 把按键、滚轮、鼠标键**吞掉**，转发给 client。
-  鼠标**移动**没法被钩子拦住（光标由系统输入栈直接更新），所以用了"回中"的办法：
-  每收到一次移动就把光标 `SetCursorPos` 拉回停靠点，位移量则用相邻两次
-  `pt` 的差值算出来 —— 这样既拿到了不受限的位移，本机光标又老实待在屏幕边角。
-- 光标的"虚拟位置"累加在同一个坐标系里，落在哪个方框里就归哪台机器处理。
-  坐标落在方框之间的缝里时，会吸附到最近的一台，光标永远不会丢。
+- Two low-level hooks (`WH_KEYBOARD_LL` / `WH_MOUSE_LL`) watch global input.
+  When not in takeover they only take a quick look; input reaches the local machine as
+  usual and you will not notice they are there.
+- During takeover the hooks return 1 to **suppress** keystrokes, wheel events and mouse
+  buttons, and forward them to the client.
+  Mouse **movement** cannot be stopped by a hook (the cursor is updated directly by the
+  system input stack), so recentering is used instead: on every movement event the
+  cursor is pulled back to the park point with `SetCursorPos`, and the displacement is
+  computed from the difference between two consecutive `pt` values - that way you get
+  the unrestricted movement while the local cursor stays quietly in the corner of the
+  screen.
+- The cursor's "virtual position" accumulates in a single coordinate system, and
+  whichever box it falls into handles it. If a coordinate lands in the gap between
+  boxes it snaps to the nearest machine, so the cursor is never lost.
 
-**client（Debian）**
+**client (Debian)**
 
-- 收到事件注入本机。X11 下用 `XTestFakeMotionEvent` 绝对定位（不需要额外权限）；
-  没有 X（Wayland）时在 `/dev/uinput` 上合成一个**绝对定位**的虚拟指针设备
-  —— 相对设备会被合成器施加指针加速，坐标会越用越偏。
-- 剪辑板读写走 `xclip`/`xsel`/`wl-clipboard` 子进程。
+- Incoming events are injected locally. Under X11 it uses `XTestFakeMotionEvent` with
+  absolute positioning (no extra privileges needed); without X (Wayland) it synthesizes
+  an **absolutely positioned** virtual pointer device on `/dev/uinput` - a relative
+  device would be subject to pointer acceleration applied by the compositor, and the
+  coordinates would drift further the more you use it.
+- Clipboard reads and writes go through `xclip`/`xsel`/`wl-clipboard` subprocesses.
 
-**安全底线**（这部分比功能更重要）
+**Safety floor** (this part matters more than the features)
 
-1. 只有 client 真的连着才进入接管模式；
-2. client 链路断开 / 心跳超时（5 秒）→ 立刻把控制权收回本机；
-3. 钩子线程意外退出 → 看门狗恢复本机输入；
-4. `Ctrl+Alt+F12` 任何时候都能强行收回；
-5. 进程崩了 Windows 会自动摘掉钩子，`atexit` 里也会解除接管。
+1. Takeover mode is entered only while a client is really connected;
+2. Client link dropped / heartbeat timeout (5 seconds) → control is pulled back to the local machine immediately;
+3. Hook thread exits unexpectedly → a watchdog restores local input;
+4. `Ctrl+Alt+F12` forces control back at any time;
+5. If the process crashes Windows removes the hooks automatically, and `atexit` also releases takeover.
 
 ---
 
-## 快速开始
+## Quick start
 
-以下假设两台机器在同一个局域网、能互相 ping 通。
+This assumes both machines are on the same LAN and can ping each other.
 
-### 1. Windows（接键鼠的那台，server）
+### 1. Windows (the machine with the keyboard and mouse, server)
 
 ```powershell
 cd C:\Users\User\CrossPC
 
-# 生成配置（会顺便探测本机分辨率）
+# generate a config (also probes the local resolution)
 python -m crosspc init
 
-# 打开界面，把 Debian 的方框拖到本机右边（拖完点"保存配置"）
+# open the GUI and drag Debian's box to the right of this machine (click "Save config" when done)
 python -m crosspc gui
 
-# 启动 server
+# start the server
 python -m crosspc server
 ```
 
-首次运行建议先做体检（**安全，不会接管键鼠**）：
+For a first run, do the health check first (**safe, it does not take over the keyboard or mouse**):
 
 ```powershell
-python -m crosspc doctor          # 显示器/钩子/注入/剪辑板/端口/热键 一次看全
-python -m crosspc selftest        # 单机回环自测：不碰真实键鼠, 22 项检查(含图片剪贴板)
-python -m crosspc clipboardtest   # 真机剪辑板: 文本与图片写进去再读回来比对
-python -m crosspc injecttest      # 真机注入: 注入无副作用的键并回读系统状态
-python -m crosspc capturetest --seconds 5 --takeover   # 真机捕获: 真接管 5 秒
+python -m crosspc doctor          # displays/hooks/injection/clipboard/ports/hotkeys in one go
+python -m crosspc selftest        # loopback self-test: never touches the real keyboard or mouse, 22 checks (including image clipboard)
+python -m crosspc clipboardtest   # real clipboard: write text and an image, read them back and compare
+python -m crosspc injecttest      # real injection: inject side-effect-free keys and read the system state back
+python -m crosspc capturetest --seconds 5 --takeover   # real capture: real takeover for 5 seconds
 ```
 
-> ⚠️ **`capturetest` / `injecttest` 必须在你自己打开的 PowerShell 窗口里跑。**
-> 如果你是在 DSH 这类 AI 助手的受限会话里执行，宿主会出于安全考虑屏蔽
-> `SendInput` / `SetCursorPos` / 全局钩子（`SetCursorPos` 返回 0 但不报错、
-> `SendInput` 返回成功却毫无效果），于是这两条命令必然"全部失败"。
-> `injecttest` 能识别这种情况并直接告诉你（退出码 2，不是你的代码有问题）。
+> ⚠️ **`capturetest` / `injecttest` must be run in a PowerShell window you opened yourself.**
+> If you run them from a restricted session such as an AI assistant like DSH, the host
+> blocks `SendInput` / `SetCursorPos` / global hooks for safety reasons (`SetCursorPos`
+> returns 0 without reporting an error, `SendInput` returns success but has no effect),
+> so those two commands are guaranteed to "fail everything".
+> `injecttest` recognizes this situation and tells you straight away (exit code 2, your
+> code is not at fault).
 
-`capturetest --takeover` 那 5 秒内本机键鼠会失效（这是特性），
-期间按 `Ctrl+Alt+F12` 可以立即恢复，到时间也会自动恢复。
+During the 5 seconds of `capturetest --takeover` the local keyboard and mouse stop
+working (that is the feature); press `Ctrl+Alt+F12` to recover immediately, and it also
+recovers on its own when the time is up.
 
-### 2. Debian（没键鼠的那台，client）
+### 2. Debian (the machine without keyboard and mouse, client)
 
 ```bash
-# 一次性安装依赖（需要 sudo）
+# one-time dependency install (needs sudo)
 sudo bash tools/install_linux.sh
 
-# 拷贝/克隆 CrossPC 目录到 Debian，然后：
+# copy/clone the CrossPC directory to Debian, then:
 cd CrossPC
-python3 -m crosspc client --host 192.168.1.10        # 换成 Windows 的 IP
-# 或者不写 IP，让它自己广播找：
+python3 -m crosspc client --host 192.168.1.10        # replace with the Windows IP
+# or leave the IP out and let it find the server by broadcast:
 python3 -m crosspc client
 ```
 
-Windows 上 `python -m crosspc server` 启动时会打印"局域网地址"，
-`python -m crosspc doctor` 也会列出来。
+On Windows, `python -m crosspc server` prints the LAN address when it starts, and
+`python -m crosspc doctor` lists it as well.
 
-### 3. 设置相对位置
+### 3. Set the relative position
 
-在 Windows 上开着 server 也能同时开界面（界面只改配置文件，不碰输入）：
+You can keep the GUI open on Windows while the server runs (the GUI only edits the config file, it does not touch input):
 
 ```powershell
 python -m crosspc gui
 ```
 
-- 左边列表选中 `client`，在画布上把方块拖到本机的**右侧/左侧/上方/下方**；
-- 松手会自动吸附成严丝合缝（差几个像素也算对齐），也支持上下居中对齐；
-- "屏幕宽/高"填 Debian 的真实分辨率（client 连上来之后会自动填好真实值）；
-- 点"保存配置"。**server 会在 2 秒内自动重新加载**，不用重启。
+- Select `client` in the list on the left, then drag its square to the **right/left/above/below** this machine on the canvas;
+- Releasing snaps it into exact alignment (a few pixels off still counts as aligned), and vertical centering is supported too;
+- Put Debian's real resolution into "Screen width/height" (the client fills in the real values automatically once it connects);
+- Click "Save config". **The server reloads it within 2 seconds**, no restart needed.
 
-### 4. 验收
+### 4. Acceptance
 
-**最省事的办法：一键验收脚本**（Windows 上双击 `tools\run-tests.cmd`，或任何机器上
-`python tools/run-tests.py`）。它会按顺序跑完环境自检 → 单机回环 → 剪辑板 → 注入 →
-捕获，跳过本平台不支持的项，最后问你一句要不要做"接管测试"。每一步的输出都会写进
-`logs\*.log`，跑完把 `logs` 目录发出来（或让 AI 助手读一下）就能定位问题。
+**The easiest way: the one-shot acceptance script** (double-click `tools\run-tests.cmd` on
+Windows, or run `python tools/run-tests.py` on any machine). It walks through environment
+self-check → loopback → clipboard → injection → capture in order, skips whatever the
+current platform does not support, and finally asks whether you want to do the "takeover
+test". The output of every step is written to `logs\*.log`, so sending out that `logs`
+directory (or letting an AI assistant read it) is enough to pin down a problem.
 
-> ⚠️ **`capturetest` / `injecttest` 必须在你自己打开的窗口里跑。**
-> AI 助手（DSH 之类）的受限会话会屏蔽 `SendInput` / `SetCursorPos` / 全局钩子
-> （`SetCursorPos` 返回 0 但不报错、`SendInput` 返回成功却毫无效果）。这两条命令
-> 会识别出这种情况并告诉你「环境不允许」（退出码 2），而不是假装失败。
+> ⚠️ **`capturetest` / `injecttest` must be run in a window you opened yourself.**
+> A restricted session such as an AI assistant (DSH and friends) blocks `SendInput` /
+> `SetCursorPos` / global hooks (`SetCursorPos` returns 0 without reporting an error,
+> `SendInput` returns success but has no effect). Those two commands detect this and tell
+> you "the environment does not allow it" (exit code 2) instead of pretending to fail.
 
-手工逐项跑也可以：
+Running each item by hand works too:
 
 ```powershell
-python -m crosspc doctor --log-file logs\doctor.log        # 环境自检
-python -m crosspc selftest --log-file logs\selftest.log    # 单机回环(22 项)
-python -m crosspc clipboardtest                            # 真实剪辑板(文本+图片)
-python -m crosspc injecttest                               # 真实注入(安全)
-python -m crosspc capturetest --seconds 5                  # 抓 5 秒, 期间动动鼠标
-python -m crosspc capturetest --seconds 5 --takeover       # 真接管 5 秒
+python -m crosspc doctor --log-file logs\doctor.log        # environment self-check
+python -m crosspc selftest --log-file logs\selftest.log    # loopback (22 checks)
+python -m crosspc clipboardtest                            # real clipboard (text + image)
+python -m crosspc injecttest                               # real injection (safe)
+python -m crosspc capturetest --seconds 5                  # capture 5 seconds, move the mouse during it
+python -m crosspc capturetest --seconds 5 --takeover       # real takeover for 5 seconds
 ```
 
-`capturetest --takeover` 那 5 秒内本机键鼠会失效（这是特性），
-期间按 `Ctrl+Alt+F12` 可以立即恢复，到时间也会自动恢复。
+During the 5 seconds of `capturetest --takeover` the local keyboard and mouse stop
+working (that is the feature); press `Ctrl+Alt+F12` to recover immediately, and it also
+recovers on its own when the time is up.
 
-然后把鼠标从 Windows 屏幕的一侧边缘继续往外推：
+Then keep pushing the mouse out past one edge of the Windows screen:
 
-- 光标应该出现在 Debian 屏幕上，键盘操作的是 Debian；
-- 从 Debian 那一侧再往回推，光标回到 Windows；
-- 在 Windows 上 `Ctrl+C` 复制一段文字（或截图后 `Ctrl+V` 图片），在 Debian 上
-  `Ctrl+V` 应该能粘贴（反过来也一样）。
+- The cursor should show up on the Debian screen and the keyboard should be driving Debian;
+- Push back in from the Debian side and the cursor returns to Windows;
+- Copy some text on Windows with `Ctrl+C` (or take a screenshot and `Ctrl+V` the image),
+  and `Ctrl+V` on Debian should paste it (and the other way round as well).
 
-两台机器联调时给两端都加上 `--log-file`，出问题就有据可查：
+When debugging the two machines together, add `--log-file` to both ends so there is evidence to work from:
 
 ```powershell
 # Windows
@@ -200,131 +219,136 @@ python3 -m crosspc client --host 192.168.1.10 --log-file logs/client.log
 
 ---
 
-## 安装
+## Installation
 
 ### Windows
 
-只需要 Python 3.8+（推荐 3.12），**不需要 pip 装任何东西**。
+You only need Python 3.8+ (3.12 recommended); **nothing to install with pip**.
 
 ```powershell
-# 如果提示找不到 python，先装一个：
+# if python is not found, install one first:
 winget install -e --id Python.Python.3.12
 
-# 检查
+# check
 python --version
 
-# 放行防火墙入站端口（需要"管理员"命令提示符）
+# allow the inbound port through the firewall (needs an Administrator command prompt)
 netsh advfirewall firewall add rule name="CrossPC" dir=in action=allow protocol=TCP localport=39987
 ```
 
-也可以直接跑 `tools\install_windows.ps1` 让它把这几步检查一遍。
+You can also just run `tools\install_windows.ps1` and let it walk through those steps.
 
-> 注意：`python` 若指向 Microsoft Store 的占位程序（`WindowsApps\python.exe`），
-> 它不会真的执行代码。用 `python --version` 确认能打印版本号。
+> Note: if `python` points at the Microsoft Store placeholder (`WindowsApps\python.exe`),
+> it will not actually execute code. Use `python --version` to confirm it prints a version.
 
 ### Debian
 
-最省事的办法是先打一个发行包，拷过去解压：
+The least painful route is to build a release zip first, copy it over and unpack it:
 
 ```powershell
-# 在 Windows 上执行(不需要联网, 纯标准库)
-python tools\make_release.py            # 生成 dist\crosspc-0.1.0.zip, 并打印 SHA256
+# run this on Windows (no network needed, standard library only)
+python tools\make_release.py            # produces dist\crosspc-0.1.0.zip and prints the SHA256
 ```
 
 ```bash
-# 把 zip 拷到 Debian(U 盘 / scp / 共享目录都行), 然后:
+# copy the zip to Debian (USB stick / scp / shared folder all work), then:
 unzip crosspc-0.1.0.zip -d ~/CrossPC && cd ~/CrossPC
 sudo bash tools/install_linux.sh
-python3 -m crosspc client --host <Windows的IP>
+python3 -m crosspc client --host <Windows IP>
 ```
 
-`tools/install_linux.sh` 会做：
+`tools/install_linux.sh` does the following:
 
-| 做的事 | 为什么 |
+| What it does | Why |
 |---|---|
-| `apt install python3 python3-tk xclip wl-clipboard` | 运行环境 + 界面 + 剪辑板工具（图片同步需要 xclip 或 wl-clipboard） |
-| 写 `/etc/udev/rules.d/99-crosspc-uinput.rules` | 让普通用户可以打开 `/dev/uinput`（Wayland 注入必需） |
-| `modprobe uinput` + 开机自动加载 | 没有这个模块就没有虚拟键鼠设备 |
-| 把当前用户加入 `input` 组 | 免 sudo 使用 uinput |
+| `apt install python3 python3-tk xclip wl-clipboard` | Runtime + GUI + clipboard tools (image sync needs xclip or wl-clipboard) |
+| Writes `/etc/udev/rules.d/99-crosspc-uinput.rules` | Lets regular users open `/dev/uinput` (required for Wayland injection) |
+| `modprobe uinput` + load it at boot | Without this module there is no virtual keyboard/mouse device |
+| Adds the current user to the `input` group | Use uinput without sudo |
 
-**加完组要重新登录一次**（或者 `newgrp input`）才生效。
+**Log out and back in once after the group change** (or run `newgrp input`) for it to take effect.
 
-X11 桌面（Xorg）下不需要 uinput，装完 python3 就能用。
+On an X11 desktop (Xorg) uinput is not needed; python3 alone is enough.
 
-也可以不打包，直接把整个目录拷过去（或用 `pip install .`，项目是零依赖的）。
+You can also skip the packaging and copy the whole directory over (or use `pip install .`, the project has no dependencies).
 
 ---
 
-## 日常使用
+## Everyday use
 
-### 热键（在 server 上识别）
+### Hotkeys (recognized on the server)
 
-| 热键 | 作用 |
+| Hotkey | Effect |
 |---|---|
-| `Ctrl+Alt+F12` | **紧急收回**：不管当前在哪台机器，立刻把控制权拿回本机 |
-| `Ctrl+Alt+L` | 锁定/解锁：锁定后鼠标顶到边缘也不会切走（适合全屏游戏/演示） |
+| `Ctrl+Alt+F12` | **Panic release**: no matter which machine is active, control comes back to the local machine at once |
+| `Ctrl+Alt+L` | Lock/unlock: once locked, the mouse hitting an edge will not switch away (handy for fullscreen games and presentations) |
 
-在配置文件里可以改（`hotkeys.panic` / `hotkeys.lock`），写法如 `"ctrl+alt+q"`、
-`"ctrl+shift+f9"`。识别用的是扫描码，不吃输入法/键盘布局影响。
+They can be changed in the config file (`hotkeys.panic` / `hotkeys.lock`), written for
+example as `"ctrl+alt+q"` or `"ctrl+shift+f9"`. Matching is done on scancodes, so it is
+immune to input methods and keyboard layouts.
 
-### 剪贴板
+### Clipboard
 
-- 双向同步：Windows 复制 → Debian 粘贴；Debian 复制 → Windows 粘贴。
-- **文本**：上限 256KB（可配），超了会跳过并提示。
-- **图片**：上限 4MB（可配）。Windows 侧会自动在 `CF_DIB`（老程序认）与注册格式
-  `PNG`（新程序认，无损带透明）之间转换，Debian 侧走 `xclip`/`wl-copy` 的
-  `image/png`。两边都是**像素级一致**（`crosspc clipboardtest` 会实测这一点）。
-- 同时有文本和图片时（例如从 Excel 复制图表），默认发**文本**，因为那通常更轻也更符合
-  直觉；想优先图片就设 `"clipboard": {"prefer": "image"}`。
-- Windows 上轮询间隔 300ms（读剪辑板序号，很便宜）；Linux 没有等价 API，
-  会自动放宽到 800ms 以上（每次都要起一个 `xclip`/`wl-paste` 进程）。
-- 不想用就在配置里 `"clipboard": {"enabled": false}`，只想要文字就
-  `"clipboard": {"images": false}`。
+- Two-way sync: copy on Windows → paste on Debian; copy on Debian → paste on Windows.
+- **Text**: 256KB limit (configurable); anything larger is skipped with a message.
+- **Images**: 4MB limit (configurable). The Windows side converts automatically between
+  `CF_DIB` (what old programs understand) and the registered `PNG` format (what new
+  programs understand, lossless and with transparency), while the Debian side goes
+  through `xclip`/`wl-copy` with `image/png`. Both ends are **pixel-identical**
+  (`crosspc clipboardtest` actually verifies this).
+- When both text and an image are present (copying a chart out of Excel, say), **text**
+  is sent by default because it is usually lighter and matches what people expect; set
+  `"clipboard": {"prefer": "image"}` to favor the image.
+- On Windows the polling interval is 300ms (reading the clipboard sequence number is very
+  cheap); Linux has no equivalent API, so it relaxes automatically to 800ms or more
+  (every poll has to spawn an `xclip`/`wl-paste` process).
+- Turn it off in the config with `"clipboard": {"enabled": false}`, or ask for text only
+  with `"clipboard": {"images": false}`.
 
-### 查看状态
+### Checking the state
 
 ```bash
-python -m crosspc server --stats        # 每 10 秒打印一次转发统计
-python -m crosspc server --log-level debug --debug-events   # 每个事件都打印(会很卡)
-python -m crosspc discover              # 在局域网里找 server
+python -m crosspc server --stats        # print forwarding statistics every 10 seconds
+python -m crosspc server --log-level debug --debug-events   # print every event (it will lag badly)
+python -m crosspc discover              # find servers on the LAN
 ```
 
 ---
 
-## 配置文件
+## Configuration file
 
-默认位置（按顺序找）：`./crosspc.json` → `%APPDATA%\CrossPC\crosspc.json`（Windows）
-/ `~/.config/crosspc/crosspc.json`（Linux）。也可以用 `--config` 指定。
+Default locations (searched in order): `./crosspc.json` → `%APPDATA%\CrossPC\crosspc.json`
+(Windows) / `~/.config/crosspc/crosspc.json` (Linux). You can also pass `--config`.
 
 ```jsonc
 {
   "version": 1,
-  "name": "win11",              // 本机名字(日志和界面里显示)
-  "port": 39987,                // server 监听端口, 两端要一致
-  "discovery_port": 39988,      // UDP 自动发现端口
-  "token": "",                  // 设了就必须两端一致, 防止陌生机器接入
-  "bind": "0.0.0.0",            // 监听地址
-  "server_host": "",            // client 角色用: server 的 IP(留空则自动发现)
-  "screen": {"w": 2560, "h": 1440},   // client 角色用: 本机分辨率(uinput 必须准确)
-  "server_screen": {"w": 1920, "h": 1080},  // 仅界面预览用, 会自动写入
+  "name": "win11",              // name of this machine (shown in logs and the GUI)
+  "port": 39987,                // server listen port, must match on both ends
+  "discovery_port": 39988,      // UDP automatic discovery port
+  "token": "",                  // if set it must match on both ends, keeps strangers out
+  "bind": "0.0.0.0",            // listen address
+  "server_host": "",            // client role: IP of the server (empty means auto-discover)
+  "screen": {"w": 2560, "h": 1440},   // client role: local resolution (uinput needs it to be exact)
+  "server_screen": {"w": 1920, "h": 1080},  // GUI preview only, written automatically
   "clipboard": {
     "enabled": true,
     "poll_ms": 300,
-    "max_bytes": 262144,          // 文本上限
-    "images": true,               // 是否同步图片(截图)
-    "max_image_bytes": 4194304,   // 图片上限(PNG 字节数)
-    "prefer": "text"              // 文本与图片同时存在时先同步哪个: text / image
+    "max_bytes": 262144,          // text limit
+    "images": true,               // whether to sync images (screenshots)
+    "max_image_bytes": 4194304,   // image limit (PNG bytes)
+    "prefer": "text"              // when text and an image are both present, sync this one first: text / image
   },
   "hotkeys": {
-    "panic": "ctrl+alt+f12",     // 紧急收回
-    "lock": "ctrl+alt+l"         // 锁定/解锁
+    "panic": "ctrl+alt+f12",     // panic release
+    "lock": "ctrl+alt+l"         // lock/unlock
   },
   "log_level": "info",           // debug / info / warn / error
-  "debug_events": false,         // true 会打印每个事件(排查用, 明显增加延迟)
+  "debug_events": false,         // true prints every event (for debugging, adds noticeable latency)
   "clients": [
     {
-      "name": "debian",          // 必须和 client 端配置里的 name 一致
-      "host": "192.168.1.10",     // 仅记录用途, server 不需要主动连 client
+      "name": "debian",          // must match the name in the client's own config
+      "host": "192.168.1.10",     // for the record only, the server never connects out to the client
       "rect": {"x": 1920, "y": 0, "w": 2560, "h": 1440},
       "enabled": true
     }
@@ -332,179 +356,213 @@ python -m crosspc discover              # 在局域网里找 server
 }
 ```
 
-关于 `rect`：
+About `rect`:
 
-- 坐标系是"虚拟桌面"，**server 的左上角固定是 (0,0)**，单位物理像素；
-- `rect` 整段省略 → server 会把这台 client 自动摆到已有最右侧机器的右边，
-  尺寸用 client 上次上报的真实分辨率（缓存在 `crosspc.cache.json`）；
-- 只写 `x`/`y` 不写 `w`/`h` → 位置照用，尺寸走自动探测；
-- 两台机器的框**必须共边**（GUI 会自动吸附）。手工写坐标时如果留了缝，
-  CrossPC 会容错 128 像素以内的小缝，缝太大就不让穿过去了。
+- The coordinate system is the "virtual desktop" and **the server's top-left corner is
+  fixed at (0,0)**, in physical pixels;
+- Leaving the whole `rect` out → the server places this client automatically to the right
+  of the rightmost existing machine, sized with the real resolution the client reported
+  last time (cached in `crosspc.cache.json`);
+- Giving only `x`/`y` and no `w`/`h` → the position is used as written and the size comes
+  from automatic detection;
+- The two machines' boxes **must share an edge** (the GUI snaps them). If you write the
+  coordinates by hand and leave a gap, CrossPC tolerates small gaps of up to 128 pixels;
+  any bigger and the cursor cannot cross.
 
-配置文件被界面改动后，server 会在 2 秒内自动重新加载布局（控制权会先收回本机）。
-配置写坏了也不影响已经跑着的 server —— 它会继续用旧布局并打印警告。
+After the GUI changes the config file, the server reloads the layout automatically within
+2 seconds (control is pulled back to the local machine first). A broken config does not
+disturb a running server - it keeps using the old layout and prints a warning.
 
 ---
 
-## 命令行参考
+## Command-line reference
 
-| 命令 | 说明 |
+| Command | Description |
 |---|---|
-| `crosspc init` | 生成配置文件，顺便探测本机分辨率 |
-| `crosspc gui` | 图形界面设置相对位置（只写配置，不接管输入） |
-| `crosspc server` | 以 server 身份运行（接键鼠的那台） |
-| `crosspc client` | 以 client 身份运行（没键鼠的那台） |
-| `crosspc doctor` | 环境自检：显示器、钩子、注入、剪辑板、端口、热键、自动发现 |
-| `crosspc selftest` | 单机回环自测（假后端，不碰真实键鼠），22 项检查 |
-| `crosspc capturetest` | 真机捕获验收：抓 N 秒键鼠并统计，`--takeover` 会真接管 |
-| `crosspc injecttest` | 真机注入验收：注入修饰键/扩展键/锁定键并回读状态，`--window` 会往自建窗口真打字 |
-| `crosspc clipboardtest` | 真机剪辑板验收：文本与图片写入后读回**逐像素**比对（会临时改剪辑板，结束还原） |
-| `crosspc discover` | 广播查找局域网里的 server |
+| `crosspc init` | Generate a config file, probing the local resolution along the way |
+| `crosspc gui` | GUI for setting the relative position (writes config only, never takes over input) |
+| `crosspc server` | Run as the server (the machine with the keyboard and mouse) |
+| `crosspc client` | Run as the client (the machine without them) |
+| `crosspc doctor` | Environment self-check: displays, hooks, injection, clipboard, ports, hotkeys, discovery |
+| `crosspc selftest` | Loopback self-test (fake backend, never touches the real keyboard or mouse), 22 checks |
+| `crosspc capturetest` | Real capture acceptance: capture keyboard and mouse for N seconds and report; `--takeover` performs a real takeover |
+| `crosspc injecttest` | Real injection acceptance: inject modifier/extension/lock keys and read the state back; `--window` actually types into a self-made window |
+| `crosspc clipboardtest` | Real clipboard acceptance: write text and an image then read them back for a **pixel-by-pixel** comparison (it changes the clipboard temporarily and restores it at the end) |
+| `crosspc discover` | Broadcast to find servers on the LAN |
 
-常用参数：
+Common options:
 
 ```bash
---config PATH        指定配置文件
---port N             覆盖端口
---token SECRET       覆盖口令
---host IP            client: server 地址
---backend NAME       强制后端: windows / x11 / uinput / fake
+--config PATH        use a specific config file
+--port N             override the port
+--token SECRET       override the token
+--host IP            client: address of the server
+--backend NAME       force a backend: windows / x11 / uinput / fake
 --log-level LEVEL    debug / info / warn / error
---log-file PATH      把日志同时写到文件(UTF-8, 追加模式, 自动建目录)
---debug-events       打印每个输入事件(排查粘键/丢事件时有用)
+--log-file PATH      also write logs to a file (UTF-8, append mode, creates directories)
+--debug-events       print every input event (useful when chasing stuck keys or dropped events)
 ```
 
-`--log-file` 是排查联调问题的关键：在受限会话里跑不了真机测试，但让用户在自己窗口里
-带上这个参数跑一遍，日志就留在文件里了（`logs/` 目录）。
+`--log-file` is the key to debugging a two-machine setup: real-hardware tests cannot run
+in a restricted session, but having the user run once with this option in their own
+window leaves the log in a file (the `logs/` directory).
 
-`server` 还有 `--bind`、`--stats`、`--dry-run`（不装钩子，只验证网络/握手）；
-`client` 还有 `--once`、`--no-clipboard`。
+`server` also has `--bind`, `--stats` and `--dry-run` (no hooks installed, it only
+exercises the network/handshake); `client` also has `--once` and `--no-clipboard`.
 
 ---
 
-## 排错
+## Troubleshooting
 
-**先跑这两条，绝大多数问题它会直接告诉你：**
+**Run these two first; they tell you about the vast majority of problems directly:**
 
 ```bash
-python -m crosspc doctor            # server 上跑
-python -m crosspc selftest          # 任意一台机器上跑都能跑
+python -m crosspc doctor            # run this on the server
+python -m crosspc selftest          # runs on any machine
 ```
 
-| 症状 | 可能原因与处理 |
+| Symptom | Likely cause and what to do |
 |---|---|
-| 鼠标推到边缘没反应 | 位置没设对。`crosspc gui` 检查两个方框是否共边；`server` 启动日志会打印 `虚拟桌面` 布局，确认 client 的位置和你以为的一致 |
-| client 连不上 | ① Windows 防火墙没放行 TCP 39987（见上面的 `netsh` 命令）；② IP 写错（`crosspc doctor` 会列出本机地址）；③ 两台不在同一网段 |
-| `doctor` 里"键鼠钩子"失败 | 杀软/输入法的"按键保护"拦截了全局钩子；换成管理员权限运行，或把 CrossPC 加进白名单 |
-| 剪切板不同步 | `doctor` 看"剪辑板"一项；Linux 上确认装了 `xclip` 或 `wl-clipboard`；Wayland 下确认 `wl-copy` 可用 |
-| Debian 上没有鼠标光标 | client 在 X11 下应该有；如果是 Wayland 且 `doctor` 说用了 uinput，确认 `ls -l /dev/uinput` 存在且你有权限（跑过 `install_linux.sh` 并重新登录） |
-| Debian 上坐标整体偏移 | uinput 是绝对定位设备，需要准确的分辨率：在 client 配置里写 `"screen": {"w": 2560, "h": 1440}`，或 `CROSSPC_SCREEN=2560x1440 python3 -m crosspc client ...` |
-| 打字偶尔粘连（一直按着 Ctrl） | 正常情况下切换/断线会自动抬键。如果复现了，用 `--debug-events` 抓日志发我 |
-| server 卡住、键鼠失灵 | 按 `Ctrl+Alt+F12`。仍然不行就直接关掉 server 进程：钩子会随进程一起消失 |
-| 有按键在 Debian 上没反应 | `Ctrl+Alt+Del` 属于 Windows 安全注意序列，钩子拿不到，任何同类工具都转发不了 |
+| Pushing the mouse to the edge does nothing | The position is not set up right. Use `crosspc gui` to check that the two boxes share an edge; the `server` startup log prints the virtual desktop layout, confirm the client's position matches what you expect |
+| The client cannot connect | ① Windows Firewall has not allowed TCP 39987 (see the `netsh` command above); ② wrong IP (`crosspc doctor` lists the local addresses); ③ the two machines are on different subnets |
+| "Keyboard/mouse hooks" fails in `doctor` | Antivirus/input-method "key protection" is blocking global hooks; run with Administrator rights, or whitelist CrossPC |
+| The clipboard does not sync | Check the "Clipboard" item in `doctor`; on Linux make sure `xclip` or `wl-clipboard` is installed; under Wayland make sure `wl-copy` is available |
+| No mouse cursor on Debian | Under X11 the client should show one; if it is Wayland and `doctor` says uinput is in use, check that `ls -l /dev/uinput` exists and that you have permission (run `install_linux.sh` and log in again) |
+| Coordinates on Debian are offset overall | uinput is an absolutely positioned device and needs an exact resolution: put `"screen": {"w": 2560, "h": 1440}` in the client config, or use `CROSSPC_SCREEN=2560x1440 python3 -m crosspc client ...` |
+| Typing occasionally sticks (Ctrl stays held) | Normally switching/going offline releases keys automatically. If you can reproduce it, capture a log with `--debug-events` and send it to me |
+| The server is stuck and the keyboard and mouse are dead | Press `Ctrl+Alt+F12`. If that does not help, just kill the server process: the hooks disappear with it |
+| Some keys do nothing on Debian | `Ctrl+Alt+Del` is part of the Windows secure attention sequence, hooks cannot see it, and no tool of this kind can forward it |
 
 ---
 
-## 已知限制（请务必看一遍）
+## Known limitations (please read this once)
 
-1. **Linux 只能当 client（注入端），不能当 server。**
-   在 Linux 上"捕获并吞掉本机输入"需要独占所有 evdev 设备（`EVIOCGRAB`）
-   并与各家的 Wayland 合成器分别协商，抢错设备或进程崩掉会直接把用户的键鼠弄废，
-   所以这一版没有做。你的场景里 Debian 本来就没键鼠，不影响使用。
-2. **剪贴板**：文本与图片（PNG）都支持；**文件列表、富文本（HTML/RTF）不同步**。
-   Linux 侧的图片同步需要 `wl-clipboard` 或 `xclip`（`xsel` 只能处理文本）。
-3. **管理员窗口（UAC 提权程序）收不到注入。** Windows 的 UIPI 机制限制，
-   想让 CrossPC 能操作管理员窗口，需要以管理员身份运行 CrossPC。
-4. **`Ctrl+Alt+Del` 转发不了**（安全注意序列只在 winlogon 桌面处理）。
-5. **Wayland 下无法拦截/注入某些合成器自有的手势**，且需要一个 udev 规则（脚本已处理）。
-6. **多显示器**：以整块虚拟桌面为一块屏幕参与共享（也就是把 server 的所有显示器
-   当成一个大方块），不是每个显示器单独共享。
-7. **DPI 缩放**：已按物理像素处理（进程声明 per-monitor-v2），所以 Windows 缩放
-   125%/150% 都不会错位；但如果某个应用自己做了奇怪的坐标处理，可能表现不一致。
-8. **无加密、无认证（除 `token` 明文比对）**：设计前提是"可信局域网"。
-   同网段的任何人都能连上你的 server（未设 token 时）。不要暴露到公网。
-9. **延迟**：TCP + 批量发送，局域网内通常感觉不到；但它是软件方案，
-   比不上硬件 KVM。
-
----
-
-## 安全性说明
-
-- 只监听入站 TCP（server 端），client 主动连 server；
-- `token` 是明文的简单校验，只用于挡住"误连"，不是加密；
-- 剪辑板内容是明文过网的；
-- server 会记录连上来的机器名，未知机器名会**自动登记**到最右侧并写入配置
-  （方便首次使用，但请确认 `crosspc server` 日志里没有陌生机器）。
-
-如果对保密有要求：设一个 `token`，并且只在受信任的网段用。
+1. **Linux can only be a client (the injection side), never a server.**
+   Capturing and suppressing local input on Linux requires exclusive access to every
+   evdev device (`EVIOCGRAB`) and separate negotiation with each Wayland compositor;
+   grabbing the wrong device or crashing the process would leave the user's keyboard and
+   mouse unusable, so this version does not do it. Debian in your setup has no keyboard
+   or mouse anyway, so it makes no difference in practice.
+2. **Clipboard**: text and images (PNG) are both supported; **file lists and rich text
+   (HTML/RTF) are not synced**. Image sync on the Linux side needs `wl-clipboard` or
+   `xclip` (`xsel` can only handle text).
+3. **Administrator windows (UAC-elevated programs) receive no injection.** That is a
+   Windows UIPI restriction; for CrossPC to operate administrator windows, CrossPC itself
+   has to run as Administrator.
+4. **`Ctrl+Alt+Del` cannot be forwarded** (the secure attention sequence is only handled
+   on the winlogon desktop).
+5. **Under Wayland some compositor-specific gestures cannot be intercepted or injected**,
+   and a udev rule is required (the script already handles it).
+6. **Multiple monitors**: the whole virtual desktop participates in sharing as one screen
+   (that is, all of the server's monitors are treated as a single big box), monitors are
+   not shared individually.
+7. **DPI scaling**: everything is handled in physical pixels (the process declares
+   per-monitor-v2), so Windows scaling at 125%/150% does not misplace anything; but if
+   some application does its own odd coordinate handling, behavior may be inconsistent.
+8. **No encryption, no authentication (beyond a plaintext `token` comparison)**: the
+   design assumption is a "trusted LAN". Anyone on the same subnet can connect to your
+   server (when no token is set). Do not expose it to the internet.
+9. **Latency**: TCP with batched sending, usually imperceptible on a LAN; but it is a
+   software solution and will not match a hardware KVM.
 
 ---
 
-## 项目结构与开发
+## Security notes
+
+- It only listens on inbound TCP (on the server side); the client connects out to the server;
+- `token` is a simple plaintext check used only to keep accidental connections out, not encryption;
+- Clipboard content crosses the network in plaintext;
+- The server records the names of machines that connect; an unknown name is **registered
+  automatically** to the rightmost position and written into the config (convenient for
+  first use, but do check the `crosspc server` log for machines you do not recognize).
+
+If confidentiality matters: set a `token` and only use it on a trusted subnet.
+
+---
+
+## Project layout and development
 
 ```
 crosspc/
-  __main__.py       python -m crosspc 入口
-  cli.py            子命令解析
-  config.py         配置读写 + 布局装配 + 分辨率缓存
-  layout.py         虚拟桌面几何(纯计算, 全测试覆盖)
-  router.py         输入路由状态机(纯逻辑, 全测试覆盖)
-  protocol.py       线协议: 分帧 + JSON/二进制编解码
-  net.py            TCP 链路(批量发送/心跳) + UDP 自动发现
-  clipboard.py      剪辑板同步(文本+图片, 防回环)
-  image.py          纯标准库图片编解码: PNG <-> RGBA <-> Windows DIB
-  server.py         server 应用(钩子/网络/剪贴板/热键编排)
-  client.py         client 应用(连接/注入/重连)
-  gui.py            Tkinter 相对位置设置界面
-  selftest.py       回环自测 + 真机捕获验收 + 真机剪辑板验收
-  injecttest.py     真机注入验收(不抢焦点的那种)
-  hotkey.py         热键解析与识别
-  keys.py           扫描码 ↔ keysym/evdev/VK 映射表
-  util.py           日志/坐标换算/临时目录挑选
-  events.py         归一化输入事件
+  __main__.py       entry point for python -m crosspc
+  cli.py            subcommand parsing
+  config.py         config read/write + layout assembly + resolution cache
+  layout.py         virtual desktop geometry (pure computation, fully covered by tests)
+  router.py         input routing state machine (pure logic, fully covered by tests)
+  protocol.py       wire protocol: framing + JSON/binary codecs
+  net.py            TCP link (batched sending/heartbeat) + UDP automatic discovery
+  clipboard.py      clipboard sync (text + images, loop prevention)
+  image.py          standard-library-only image codec: PNG <-> RGBA <-> Windows DIB
+  server.py         server application (wiring hooks/network/clipboard/hotkeys)
+  client.py         client application (connect/inject/reconnect)
+  gui.py            Tkinter GUI for setting the relative position
+  selftest.py       loopback self-test + real capture acceptance + real clipboard acceptance
+  injecttest.py     real injection acceptance (the kind that does not steal focus)
+  hotkey.py         hotkey parsing and matching
+  keys.py           scancode ↔ keysym/evdev/VK mapping tables
+  util.py           logging/coordinate conversion/temporary directory picking
+  events.py         normalized input events
   backend/
-    base.py         平台后端接口(冻结契约)
-    windows.py      ctypes: 低层钩子 / SendInput / 剪辑板(文本+CF_DIB/DIBV5/PNG)
-    linux.py        Linux 门面(注入策略 + 剪辑板工具)
-    linux_x11.py    ctypes: libX11/libXtst(XTest 注入)
-    linux_uinput.py ctypes: /dev/uinput(绝对定位虚拟指针)
-    fake.py         假后端, 用于回环自测
-tests/              199 个单元/集成测试(全部不需要真实键鼠)
-tools/              安装脚本、systemd 服务、启动包装、一键验收、发行包打包
-logs/               真机测试的日志(自动生成, 已被 .gitignore 忽略)
+    base.py         platform backend interface (frozen contract)
+    windows.py      ctypes: low-level hooks / SendInput / clipboard (text + CF_DIB/DIBV5/PNG)
+    linux.py        Linux facade (injection strategy + clipboard tools)
+    linux_x11.py    ctypes: libX11/libXtst (XTest injection)
+    linux_uinput.py ctypes: /dev/uinput (absolutely positioned virtual pointer)
+    fake.py         fake backend, used for the loopback self-test
+tests/              207 unit/integration tests (none of them need a real keyboard or mouse)
+tools/              install scripts, systemd service, launch wrappers, one-shot acceptance,
+                    release packaging, and check_english.py (the language guard)
+logs/               real-hardware test logs (generated automatically, ignored by .gitignore)
 ```
 
-跑测试（不需要第二台机器，也不会碰真实键鼠）：
+Running the tests (no second machine needed, and the real keyboard and mouse are never touched):
 
 ```bash
-python -m unittest discover -s tests -t .      # 199 项
-python -m crosspc selftest                     # 端到端回环(22 项检查)
-python tools/run-tests.py                      # 一键真机验收(含上面两项)
+python -m unittest discover -s tests -t .      # 207 tests
+python -m crosspc selftest                     # end-to-end loopback (22 checks)
+python tools/run-tests.py                      # one-shot real-hardware acceptance (includes the two above)
+python tools/check_english.py                  # language policy: no CJK outside README.zh-CN.md
 ```
 
-### 和 Barrier / Deskflow / InputLeap 的关系
+### Relationship to Barrier / Deskflow / InputLeap
 
-它们是成熟的开源同类工具，功能比 CrossPC 多（多平台、加密传输等）。
-CrossPC 的定位是：**零依赖、代码量小到能自己读懂并改动、专门针对
-"Windows 带键鼠 + Debian 当副屏"这一种拓扑**。想看它的实现，
-从 `layout.py` + `router.py`（位置计算）和 `backend/windows.py`（钩子与注入）
-三个文件读起就够了。
+They are mature open-source tools of the same kind and do more than CrossPC (multiple
+platforms, encrypted transport and so on). CrossPC's niche is: **zero dependencies, a
+codebase small enough to read and modify yourself, aimed specifically at the
+"Windows with the keyboard and mouse + Debian as the second screen" topology**. To see
+how it works, reading three files is enough: `layout.py` + `router.py` (position
+computation) and `backend/windows.py` (hooks and injection).
 
-### 持续集成
+### Continuous integration
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) 在 GitHub 上跑三件事：
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs three things on GitHub:
 
-| 任务 | 覆盖 |
+| Job | Coverage |
 |---|---|
-| 单元/集成测试 | Ubuntu 22.04(Python 3.8) / Ubuntu latest(3.11、3.13) / Windows(3.12) |
-| `crosspc selftest` | **在真 Linux 内核上**跑完整回环（假后端，不需要真实键鼠） |
-| 打包与安装 | `pip install .` + `make_release.py` + 校验发行包里没有缓存/私有配置 |
+| Unit/integration tests | Ubuntu 22.04 (Python 3.8) / Ubuntu latest (3.11, 3.13) / Windows (3.12) |
+| `crosspc selftest` | Runs the full loopback **on a real Linux kernel** (fake backend, no real keyboard or mouse needed) |
+| Packaging and installation | `pip install .` + `make_release.py` + verifying the release zip contains no caches or private config |
 
-开发机是 Windows，Linux 那条路（X11/uinput 注入、xclip 剪辑板）在本机跑不起来，
-所以 CI 里的 Linux 任务不是走过场——它是唯一能验证 Linux 侧运行路径的地方。
-真键鼠相关的两项（`capturetest` / `injecttest`）故意不在 CI 里跑：CI 机器没有
-交互桌面，跑了必然失败，那是环境限制而不是代码问题。
+The development machine is Windows, and the Linux path (X11/uinput injection, xclip
+clipboard) cannot run there, so the Linux jobs in CI are not a formality - they are the
+only place where the Linux runtime path can be verified. The two real keyboard/mouse jobs
+(`capturetest` / `injecttest`) are deliberately kept out of CI: CI machines have no
+interactive desktop, so they would fail by definition, and that is an environment
+limitation rather than a code problem.
 
-## 许可证
+Every matrix job also runs the language guard: `tests/test_language.py` drives
+`tools/check_english.py`, which fails the build if any file that git would commit
+contains CJK characters (the one exception is `README.zh-CN.md`). The rule is stated
+once in prose, so it is easy to break by accident - a single Chinese comment pasted
+into a new module is almost invisible in a diff - and this is what makes it stick.
 
-[MIT](LICENSE)。
+## Language
+
+The repository is English-only: documentation, code comments, docstrings, log lines,
+error messages, CLI help and script output. The original Chinese README is kept as
+[README.zh-CN.md](README.zh-CN.md) for the author's own reference. The rule is enforced
+mechanically by `tools/check_english.py` and by the test suite, not by review discipline.
+
+## License
+
+[MIT](LICENSE).

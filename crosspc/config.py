@@ -1,13 +1,14 @@
-"""配置文件(JSON)读写与布局装配。
+"""Config file (JSON) reading/writing and layout assembly.
 
-配置文件长这样(所有字段都可省略, 省略即用默认值):
+The config file looks like this (every field may be omitted, and omitting one
+means using its default):
 
     {
       "version": 1,
-      "name": "win11",                  // 本机在界面/日志里的名字
-      "port": 39987,                    // server 监听端口
-      "discovery_port": 39988,          // UDP 自动发现端口
-      "token": "",                      // 设了就必须两端一致, 防止陌生机器接入
+      "name": "win11",                  // this machine's name in the UI/logs
+      "port": 39987,                    // the port the server listens on
+      "discovery_port": 39988,          // the UDP discovery port
+      "token": "",                      // once set, both ends must match, to keep unknown machines out
       "clipboard": {"enabled": true, "poll_ms": 300, "max_bytes": 262144},
       "hotkeys": {"panic": "ctrl+alt+f12", "lock": "ctrl+alt+l"},
       "clients": [
@@ -16,8 +17,10 @@
       ]
     }
 
-"rect" 可以整段省略(client 首次连接时 server 会拿到它的真实分辨率并按
-"依次摆到右边"自动排布), 也可以只写 x/y 让宽高走自动探测。
+"rect" may be omitted entirely (when a client connects for the first time the
+server learns its real resolution and lays it out automatically, "one after
+another to the right"), or only x/y may be written and the width/height left to
+automatic detection.
 """
 from __future__ import annotations
 
@@ -39,7 +42,7 @@ DEFAULT_PANIC = "ctrl+alt+f12"
 DEFAULT_LOCK = "ctrl+alt+l"
 DEFAULT_CONFIG_NAME = "crosspc.json"
 CACHE_NAME = "crosspc.cache.json"
-#: 拿不到真实分辨率时的兜底屏幕尺寸
+#: Fallback screen size when the real resolution cannot be obtained
 FALLBACK_SCREEN = (1920, 1080)
 
 
@@ -56,7 +59,7 @@ def user_config_dir() -> str:
 
 
 def default_config_path() -> str:
-    """没有显式指定 --config 时的查找顺序: 当前目录 > 用户配置目录。"""
+    """Lookup order when --config is not given explicitly: current directory > user config directory."""
     local = os.path.join(os.getcwd(), DEFAULT_CONFIG_NAME)
     if os.path.exists(local):
         return local
@@ -68,7 +71,7 @@ class ClientEntry:
     name: str
     host: str = ""
     port: int = 0
-    rect: Optional[Rect] = None          # None = 自动排布
+    rect: Optional[Rect] = None          # None = automatic placement
     enabled: bool = True
     note: str = ""
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -97,18 +100,20 @@ def _rect_from(value: Any) -> Optional[Rect]:
         w = int(value.get("w", 0) or 0)
         h = int(value.get("h", 0) or 0)
         if w <= 0 or h <= 0:
-            # 只有位置没有尺寸: 位置保留, 尺寸交给自动探测
+            # position only, no size: keep the position, leave the size to
+            # automatic detection
             return Rect(int(value.get("x", 0) or 0), int(value.get("y", 0) or 0), 0, 0)
         return Rect(int(value.get("x", 0) or 0), int(value.get("y", 0) or 0), w, h)
     if isinstance(value, (list, tuple)) and len(value) == 4:
         return Rect(*(int(v) for v in value))
     if isinstance(value, str) and value.strip().lower() == "auto":
         return None
-    raise ConfigError("rect 格式不对: %r (应为 {x,y,w,h} 或 [x,y,w,h])" % (value,))
+    raise ConfigError("bad rect format: %r (expected {x,y,w,h} or [x,y,w,h])"
+                      % (value,))
 
 
 def _size_from(value: Any) -> Optional[Tuple[int, int]]:
-    """解析屏幕尺寸: {w,h} / [w,h] / "2560x1440" 都接受。"""
+    """Parse a screen size: {w,h} / [w,h] / "2560x1440" are all accepted."""
     if not value:
         return None
     if isinstance(value, dict):
@@ -119,9 +124,10 @@ def _size_from(value: Any) -> Optional[Tuple[int, int]]:
         try:
             w, h = (int(v) for v in value.lower().replace("*", "x").split("x"))
         except Exception as exc:
-            raise ConfigError("screen 写成了 %r, 应为 2560x1440 或 {w,h}" % value) from exc
+            raise ConfigError("screen was written as %r, expected 2560x1440 or "
+                              "{w,h}" % value) from exc
     else:
-        raise ConfigError("screen 格式不对: %r" % (value,))
+        raise ConfigError("bad screen format: %r" % (value,))
     return (w, h) if w > 0 and h > 0 else None
 
 
@@ -133,29 +139,30 @@ class Config:
     discovery_port: int = DEFAULT_DISCOVERY_PORT
     token: str = ""
     bind: str = "0.0.0.0"
-    #: client 角色用: server 的地址(留空则启动时用 UDP 自动发现)
+    #: for the client role: the server address (leave empty to use UDP discovery at startup)
     server_host: str = ""
     clients: List[ClientEntry] = field(default_factory=list)
     clipboard_enabled: bool = True
     clipboard_poll_ms: int = DEFAULT_CLIPBOARD_POLL_MS
     clipboard_max_bytes: int = DEFAULT_CLIPBOARD_MAX
-    #: 是否同步图片(截图)
+    #: whether to sync images (screenshots)
     clipboard_images: bool = True
-    #: 图片上限(PNG 字节数)。4MB 够放一张 4K 截图, 再大就该用别的办法传了
+    #: Image limit (PNG bytes). 4MB holds one 4K screenshot; anything bigger
+    #: should be transferred some other way
     clipboard_max_image_bytes: int = DEFAULT_CLIPBOARD_MAX_IMAGE
-    #: 文本和图片同时存在时先同步哪个: "text" / "image"
+    #: which one to sync first when text and an image are both present: "text" / "image"
     clipboard_prefer: str = "text"
     hotkey_panic: str = DEFAULT_PANIC
     hotkey_lock: str = DEFAULT_LOCK
     log_level: str = "info"
     debug_events: bool = False
-    #: 仅用于界面预览: 记住上次 server 的分辨率
+    #: for UI preview only: remembers the previous server resolution
     server_screen: Optional[Tuple[int, int]] = None
-    #: client 角色用: 本机屏幕尺寸(不给就自动探测; Linux+uinput 必须准确)
+    #: for the client role: the local screen size (auto-detected when absent; must be accurate for Linux+uinput)
     screen: Optional[Tuple[int, int]] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
-    # ------------------------------------------------------------ 读写
+    # ------------------------------------------------------------ reading / writing
     @staticmethod
     def defaults(path: str = "") -> "Config":
         return Config(path=path or default_config_path(),
@@ -170,18 +177,20 @@ class Config:
                 with open(real, "r", encoding="utf-8") as fh:
                     raw = json.load(fh)
             except json.JSONDecodeError as exc:
-                raise ConfigError("配置文件 %s 不是合法 JSON: %s" % (real, exc)) from exc
+                raise ConfigError("config file %s is not valid JSON: %s"
+                                  % (real, exc)) from exc
             except OSError as exc:
-                raise ConfigError("读不了配置文件 %s: %s" % (real, exc)) from exc
+                raise ConfigError("cannot read config file %s: %s"
+                                  % (real, exc)) from exc
             cfg = Config.from_dict(raw, real)
         elif not create:
-            pass                      # 不存在就用默认值, 由调用方决定是否保存
+            pass                      # if it does not exist, use the defaults; the caller decides whether to save
         return cfg
 
     @staticmethod
     def from_dict(raw: Dict[str, Any], path: str = "") -> "Config":
         if not isinstance(raw, dict):
-            raise ConfigError("配置根节点必须是对象")
+            raise ConfigError("the config root must be an object")
         cfg = Config.defaults(path)
         known = set()
         for key in ("name", "token", "bind", "log_level", "server_host"):
@@ -196,8 +205,8 @@ class Config:
         if "version" in raw:
             known.add("version")
             if int(raw["version"]) != CONFIG_VERSION:
-                raise ConfigError("配置版本 %s 不受支持(当前 %d)"
-                                  % (raw["version"], CONFIG_VERSION))
+                raise ConfigError("config version %s is not supported (current "
+                                  "%d)" % (raw["version"], CONFIG_VERSION))
         if "clipboard" in raw:
             known.add("clipboard")
             cb = raw["clipboard"] or {}
@@ -211,8 +220,8 @@ class Config:
                     cb.get("max_image_bytes", cfg.clipboard_max_image_bytes))
                 prefer = str(cb.get("prefer", cfg.clipboard_prefer)).lower()
                 if prefer not in ("text", "image"):
-                    raise ConfigError("clipboard.prefer 只能是 text 或 image, "
-                                      "收到 %r" % prefer)
+                    raise ConfigError("clipboard.prefer must be text or image, "
+                                      "got %r" % prefer)
                 cfg.clipboard_prefer = prefer
         if "hotkeys" in raw:
             known.add("hotkeys")
@@ -236,9 +245,10 @@ class Config:
         for entry in raw.get("clients", []) or []:
             known.add("clients")
             if not isinstance(entry, dict):
-                raise ConfigError("clients 里必须是对象: %r" % (entry,))
+                raise ConfigError("entries in clients must be objects: %r"
+                                  % (entry,))
             if not entry.get("name"):
-                raise ConfigError("clients 里的每个条目都要有 name")
+                raise ConfigError("every entry in clients must have a name")
             extra = {k: v for k, v in entry.items()
                      if k not in ("name", "host", "port", "rect", "enabled", "note")}
             cfg.clients.append(ClientEntry(
@@ -298,7 +308,7 @@ class Config:
         self.path = target
         return target
 
-    # ------------------------------------------------------------ 布局装配
+    # ------------------------------------------------------------ layout assembly
     def client_by_name(self, name: str) -> Optional[ClientEntry]:
         for c in self.clients:
             if c.name == name:
@@ -311,11 +321,13 @@ class Config:
     def build_layout(self, server_rect: Rect,
                      sizes: Optional[Dict[str, Tuple[int, int]]] = None
                      ) -> Layout:
-        """按配置摆出虚拟桌面。
+        """Lay out the virtual desktop according to the config.
 
-        server_rect: 运行时探测到的 server 虚拟桌面(左上角一般为 0,0)。
-        sizes: {client 名: (w,h)} 真实分辨率(来自上次连接缓存或自动发现),
-               配置里没写 rect 的 client 用它的尺寸自动排到右边。
+        server_rect: the server virtual desktop detected at runtime (its
+        top-left corner is normally 0,0).
+        sizes: {client name: (w,h)} real resolutions (from the last-connection
+        cache or from discovery); a client whose rect is not written in the
+        config is placed automatically to the right using its size.
         """
         sizes = sizes or {}
         server = make_server(self.name or _hostname(), server_rect.w, server_rect.h)
@@ -340,7 +352,7 @@ class Config:
 
     @staticmethod
     def _auto_place(placed: List[Machine], w: int, h: int) -> Rect:
-        """没配置位置时: 依次摆到已有最右侧机器的右边, 顶边对齐。"""
+        """When no position is configured: place one after another to the right of the rightmost machine so far, with top edges aligned."""
         top = placed[0].rect.y
         right = max(m.rect.right for m in placed)
         return Rect(right, top, w, h)
@@ -350,7 +362,7 @@ class Config:
         return e.rect if e else None
 
     def remember_size(self, name: str, w: int, h: int) -> None:
-        """把 client 上报的分辨率写进配置(仅当它自己没有显式尺寸时)。"""
+        """Write a client's reported resolution into the config (only when it has no explicit size of its own)."""
         e = self.client_by_name(name)
         if e is None:
             return
@@ -369,9 +381,9 @@ def _hostname() -> str:
         return "crosspc"
 
 
-# ------------------------------------------------------------------ 尺寸缓存
+# ------------------------------------------------------------------ size cache
 class SizeCache:
-    """记下每台 client 上次上报的分辨率, 让界面和自动排布有据可依。"""
+    """Remembers each client's last reported resolution, giving the UI and automatic placement something to go on."""
 
     def __init__(self, path: str):
         self.path = path

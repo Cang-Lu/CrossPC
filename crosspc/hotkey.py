@@ -1,7 +1,10 @@
-"""危险情况下的"一键收回": 解析并识别紧急/锁定热键。
+"""The 'one-key recall' for dangerous situations: parse and recognize the panic
+and lock hotkeys.
 
-热键在 server 上识别, 用的也是扫描码, 所以不吃输入法/键盘布局的影响。
-识别到之后这个按键会被吞掉, 不会再转发到远端(免得在 Debian 上多打一个字)。
+Hotkeys are recognized on the server, and they too work on scancodes, so they
+are unaffected by the input method or the keyboard layout. Once recognized, the
+key is suppressed and is no longer forwarded to the remote side (so we do not
+type an extra character on Debian).
 """
 from __future__ import annotations
 
@@ -10,7 +13,7 @@ from typing import List, Optional, Sequence, Set, Tuple
 from .events import KEY, Event
 from .keys import parse_key_name
 
-KeyId = Tuple[int, bool]          # (扫描码, 是否 E0 扩展)
+KeyId = Tuple[int, bool]          # (scancode, whether it is E0 extended)
 
 
 class HotkeyError(ValueError):
@@ -18,24 +21,25 @@ class HotkeyError(ValueError):
 
 
 def parse_spec(spec: str) -> Tuple[List[KeyId], List[KeyId]]:
-    """"ctrl+alt+f12" -> (修饰键列表, 触发键列表)。"""
+    """"ctrl+alt+f12" -> (list of modifier keys, list of trigger keys)."""
     parts = [p.strip().lower() for p in (spec or "").split("+") if p.strip()]
     if not parts:
-        raise HotkeyError("热键为空")
+        raise HotkeyError("hotkey is empty")
     keys: List[KeyId] = []
     for p in parts:
         k = parse_key_name(p)
         if k is None:
-            raise HotkeyError("不认识的热键名: %r" % p)
+            raise HotkeyError("unknown hotkey name: %r" % p)
         keys.append(k)
     return keys[:-1], [keys[-1]]
 
 
 class Hotkey:
-    """按住全部修饰键再按触发键 => 触发。
+    """Fire when all modifier keys are held down and then a trigger key is hit.
 
-    也支持写成 "ctrl+alt+q" 这种单字符触发键; 若触发键本身就是修饰键,
-    则修饰键集合里会同时包含它, 不影响判断。
+    A single-character trigger key such as "ctrl+alt+q" is also supported; if
+    the trigger key is itself a modifier, the modifier set will contain it as
+    well, which does not affect the decision.
     """
 
     def __init__(self, spec: str, name: str = ""):
@@ -51,7 +55,7 @@ class Hotkey:
         return self.spec
 
     def feed(self, ev: Event) -> bool:
-        """喂一个按键事件; 命中返回 True(调用方应吞掉该事件)。"""
+        """Feed one key event; returns True on a hit (the caller should suppress it)."""
         if ev.kind != KEY:
             return False
         key: KeyId = (ev.a, bool(ev.d))
@@ -62,7 +66,7 @@ class Hotkey:
         if key not in self.triggers:
             return False
         if all(m in self._down for m in self.mods):
-            self._down.clear()          # 防止长按重复触发
+            self._down.clear()          # avoid retriggering while held down
             return True
         return False
 
@@ -72,12 +76,12 @@ class Hotkey:
 
 def make_hotkeys(panic: str, lock: str) -> Tuple[Optional[Hotkey], Optional[Hotkey]]:
     out = []
-    for spec, name in ((panic, "紧急收回"), (lock, "锁定/解锁")):
+    for spec, name in ((panic, "panic release"), (lock, "lock/unlock")):
         if not spec:
             out.append(None)
             continue
         try:
             out.append(Hotkey(spec, name))
         except HotkeyError as exc:
-            raise HotkeyError("热键 %r 无效: %s" % (spec, exc)) from exc
+            raise HotkeyError("hotkey %r is invalid: %s" % (spec, exc)) from exc
     return out[0], out[1]

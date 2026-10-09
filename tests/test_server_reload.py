@@ -1,7 +1,8 @@
-"""配置热加载测试: 界面改完位置不用重启 server。
+"""Config hot-reload tests: positions changed in the GUI need no server restart.
 
-这是"设置相对位置"的日常流程, 所以单独钉一条集成测试: 起一个真 ServerApp
-(后端用 FakeBackend, 不碰真键鼠), 改磁盘上的配置文件, 看布局有没有跟着变。
+This is the everyday "set the relative position" flow, so it gets a dedicated
+integration test: start a real ServerApp (with FakeBackend, no real keyboard or
+mouse), change the config file on disk, and see whether the layout follows.
 """
 from __future__ import annotations
 
@@ -58,8 +59,8 @@ class TestConfigHotReload(unittest.TestCase):
 
     def test_layout_follows_config_change(self):
         self.assertEqual(self._client_rect(), Rect(1920, 0, 1280, 800))
-        # 界面把 client 挪到本机下方
-        time.sleep(1.0)                       # 让 mtime 有明显变化
+        # the GUI moves the client below the local machine
+        time.sleep(1.0)                       # make the mtime change noticeably
         cfg = Config.load(self.path)
         cfg.clients[0].rect = Rect(0, 1080, 1280, 800)
         cfg.save()
@@ -69,14 +70,14 @@ class TestConfigHotReload(unittest.TestCase):
                 break
             time.sleep(0.2)
         self.assertEqual(self._client_rect(), Rect(0, 1080, 1280, 800),
-                         "配置文件改了但布局没有热加载")
+                         "the config file changed but the layout did not hot-reload")
 
     def test_broken_config_keeps_old_layout(self):
         time.sleep(1.0)
         with open(self.path, "w", encoding="utf-8") as fh:
-            fh.write("{ 坏掉的 json")
+            fh.write("{ broken json")
         time.sleep(3.0)
-        # 旧布局必须还在, 服务也不能挂
+        # the old layout must still be there, and the service must not die
         self.assertEqual(self._client_rect(), Rect(1920, 0, 1280, 800))
         self.assertTrue(self.thread.is_alive())
 

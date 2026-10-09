@@ -1,7 +1,8 @@
-"""界面烟雾测试: 不弹窗口, 但把界面的构建/拖动/吸附/保存全跑一遍。
+"""GUI smoke tests: no window pops up, but the GUI build/drag/snap/save path runs end to end.
 
-做法是创建 Tk 根窗口后立刻 withdraw(隐藏), 于是不会在用户屏幕上闪出一个
-窗口, 而控件、画布、坐标换算、吸附算法都是真跑的。没有图形环境时自动跳过。
+The trick is to create the Tk root window and withdraw (hide) it immediately, so
+nothing flashes onto the user's screen while the widgets, canvas, coordinate
+conversion and snap algorithm all really run. Skipped automatically with no display.
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ def _display_available() -> bool:
     return True
 
 
-@unittest.skipUnless(_display_available(), "没有可用的图形环境, 跳过界面测试")
+@unittest.skipUnless(_display_available(), "no usable display environment, skipping GUI tests")
 class TestGui(unittest.TestCase):
     def setUp(self):
         from crosspc.gui import GuiApp
@@ -43,12 +44,14 @@ class TestGui(unittest.TestCase):
         self.cfg.clients = [ClientEntry(name="debian", host="10.0.0.5",
                                         rect=Rect(1920, 0, 2560, 1440))]
         self.root = tk.Tk()
-        self.root.withdraw()                 # 绝不显示窗口
+        self.root.withdraw()                 # never show the window
         self.app = GuiApp(self.root, self.cfg, Log("error"))
-        # 界面里的"本机分辨率"是运行时探测出来的: 开发机 1920x1080, 而 CI 的
-        # Windows runner 只有 1024x768 —— 于是"贴到 x=1920"这种断言在 CI 上
-        # 必然失败(吸附距离超出容差, 根本不会吸附)。测试必须自己钉死几何,
-        # 不能依赖宿主机屏幕。CI 第一次跑就是这么红的。
+        # The GUI detects the "local resolution" at runtime: the dev machine is
+        # 1920x1080 while the CI Windows runner only has 1024x768 -- so an assertion
+        # like "snap to x=1920" is bound to fail on CI (the snap distance is outside
+        # the tolerance, so no snap happens at all). Tests must pin the geometry
+        # themselves instead of trusting the host screen. That is exactly how CI
+        # first went red.
         self.app.server_rect = Rect(0, 0, 1920, 1080)
         self.app.monitors = [Rect(0, 0, 1920, 1080)]
         self.app.refresh_list()
@@ -76,14 +79,15 @@ class TestGui(unittest.TestCase):
 
     def test_hit_test_and_selection(self):
         self.app.canvas.redraw()
-        cx, cy = self.app.canvas.to_canvas(2000, 100)      # client 内部
+        cx, cy = self.app.canvas.to_canvas(2000, 100)      # inside the client
         self.assertEqual(self.app.canvas._hit(cx, cy), "debian")
-        # server 方块不可拖
+        # the server box cannot be dragged
         cx, cy = self.app.canvas.to_canvas(100, 100)
         self.assertIsNone(self.app.canvas._hit(cx, cy))
 
     def test_move_and_snap_flush_right(self):
-        # 拖到"离 server 右边差 12 像素"的位置, 松手应该吸附成严丝合缝
+        # drag to "12 pixels short of the server's right edge"; releasing must snap
+        # flush against it
         self.app.move_client("debian", 1908, 5, snap=True)
         self.assertEqual(self.cfg.clients[0].rect, Rect(1920, 0, 2560, 1440))
 
@@ -109,11 +113,12 @@ class TestGui(unittest.TestCase):
         self.assertEqual(len(self.cfg.clients), before)
 
     def test_snap_works_on_other_resolutions(self):
-        """吸附是纯几何计算, 不该和宿主分辨率绑定。
+        """Snapping is pure geometry and must not be bound to the host resolution.
 
-        这条是 CI 教我的: 原来那三条用例把"本机 1920x1080"写死了, 在 CI 的
-        1024x768 runner 上必红。这里显式换一个分辨率再验证一次, 万一以后
-        有人又把分辨率假设写回代码里, 这条会立刻报出来。
+        CI taught us this one: the three cases above had "local 1920x1080" baked in
+        and inevitably went red on the CI 1024x768 runner. Here we explicitly switch
+        to another resolution and check again, so if anyone ever writes the
+        resolution assumption back into the code, this case reports it at once.
         """
         self.app.server_rect = Rect(0, 0, 1024, 768)
         self.app.move_client("debian", 1014, 3, snap=True)
@@ -134,14 +139,15 @@ class TestGui(unittest.TestCase):
         self.assertEqual(entry.host, "192.168.1.77")
 
     def test_form_rejects_bad_numbers(self):
-        """非法输入不能崩, 也不能改坏配置(这里靠 messagebox, 用 patch 拦掉)。"""
+        """Invalid input must neither crash nor corrupt the config (this goes through
+        messagebox, which is patched out here)."""
         import tkinter.messagebox as mb
         calls = []
         old = mb.showerror
         mb.showerror = lambda *a, **k: calls.append(a)
         try:
             self.app.select("debian")
-            self.app.vars["w"].set("不是数字")
+            self.app.vars["w"].set("not a number")
             self.app.apply_form()
         finally:
             mb.showerror = old
@@ -167,21 +173,21 @@ class TestGui(unittest.TestCase):
         mb.showerror = lambda *a, **k: calls.append(a)
         mb.showinfo = lambda *a, **k: None
         try:
-            self.app.vars["g_panic"].set("ctrl+这不是键")
+            self.app.vars["g_panic"].set("ctrl+not-a-key")
             self.app.save()
         finally:
             mb.showerror, mb.showinfo = old_e, old_i
         self.assertTrue(calls)
 
     def test_uses_cached_client_size(self):
-        """没连过的 client 用缓存里的真实分辨率画方块。"""
+        """A client that has never connected is drawn with the real resolution from the cache."""
         from crosspc.gui import GuiApp
         cfg = Config.defaults(self.path)
         cfg.clients = [ClientEntry(name="debian", rect=None)]
         cache = SizeCache(SizeCache.default_path(cfg.path))
         cache.set("debian", 2560, 1440)
         app = GuiApp(self.root, cfg, Log("error"))
-        app.server_rect = Rect(0, 0, 1920, 1080)      # 不依赖宿主分辨率
+        app.server_rect = Rect(0, 0, 1920, 1080)      # does not depend on the host resolution
         rects = [r for n, r, s, _ in app.machines_for_canvas() if not s]
         self.assertEqual(rects[0], Rect(0, 0, 2560, 1440))
         del app

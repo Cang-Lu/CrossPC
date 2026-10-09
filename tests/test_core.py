@@ -1,7 +1,8 @@
-"""核心层单元测试: 协议 / 布局 / 路由 / 配置 / 热键 / 剪辑板。
+"""Core layer unit tests: protocol / layout / router / config / hotkey / clipboard.
 
-全部是纯逻辑, 不碰真实键鼠、不碰网络、不需要第二台机器。
-覆盖的是"位置计算 + 关键安全行为"这两块最容易出错的地方。
+Everything here is pure logic: no real keyboard or mouse, no network, no second
+machine. It covers the two areas that break most easily: "position calculation"
+and "critical safety behaviour".
 """
 from __future__ import annotations
 
@@ -35,15 +36,15 @@ class TestProtocol(unittest.TestCase):
         self.assertEqual(reader.pending(), 0)
 
     def test_frame_reader_partial_and_multiple(self):
-        """TCP 是字节流: 半帧、粘帧都必须能正确处理。"""
+        """TCP is a byte stream: partial frames and coalesced frames must both be handled."""
         a = P.frame(P.T_PING, b"a")
         b = P.frame(P.T_PONG, b"bb")
         reader = P.FrameReader()
         self.assertEqual(reader.feed(a[:3]), [])
-        # 前 3 字节 + 剩下的 a + 整个 b 一起喂进去
+        # the first 3 bytes, then the rest of a plus all of b fed in together
         out = reader.feed(a[3:] + b)
         self.assertEqual(out, [(P.T_PING, b"a"), (P.T_PONG, b"bb")])
-        # 一字节一字节地喂
+        # feed it one byte at a time
         reader = P.FrameReader()
         got = []
         for i in range(len(b)):
@@ -56,7 +57,7 @@ class TestProtocol(unittest.TestCase):
             P.FrameReader().feed(bogus)
 
     def test_encode_input_uses_fixed_offsets(self):
-        """一条移动记录 = 1 字节类型 + 4 字节坐标; 顺序不能错。"""
+        """One motion record = 1 type byte + 4 coordinate bytes; the order must not slip."""
         payload = P.encode_input([Event.motion(0x0102, 0x0304)])
         self.assertEqual(payload, b"\x00\x01" + bytes([P.EV_MOTION]) +
                          bytes([1, 2, 3, 4]))
@@ -90,8 +91,8 @@ class TestProtocol(unittest.TestCase):
         self.assertEqual(msg["name"], "win")
 
     def test_clipboard_message_keeps_unicode(self):
-        msg = P.parse_json(P.clipboard_text("中文🙂", "win")[5:])
-        self.assertEqual(msg["text"], "中文🙂")
+        msg = P.parse_json(P.clipboard_text("café ünïcode Ω Привет 🙂", "win")[5:])
+        self.assertEqual(msg["text"], "café ünïcode Ω Привет 🙂")
         self.assertEqual(msg["origin"], "win")
 
     def test_clipboard_image_frame_is_raw_png(self):
@@ -99,7 +100,7 @@ class TestProtocol(unittest.TestCase):
         data = P.clipboard_image(png)
         (msg_type, body) = P.FrameReader().feed(data)[0]
         self.assertEqual(msg_type, P.T_CLIPBOARD_IMAGE)
-        self.assertEqual(body, png)          # 原样透传, 不套 JSON/base64
+        self.assertEqual(body, png)          # passed through verbatim, no JSON/base64 wrapping
 
     def test_clipboard_image_size_guard(self):
         with self.assertRaises(P.ProtocolError):
@@ -109,7 +110,7 @@ class TestProtocol(unittest.TestCase):
 # ===========================================================================
 class TestLayout(unittest.TestCase):
     def setUp(self):
-        # server 1920x1080, client 2560x1440 贴在右边
+        # server 1920x1080, client 2560x1440 parked on the right
         self.srv = make_server("win", 1920, 1080)
         self.cli = make_client("deb", 1920, 0, 2560, 1440)
         self.layout = Layout(self.srv, [self.cli])
@@ -118,14 +119,14 @@ class TestLayout(unittest.TestCase):
         r = Rect(0, 0, 10, 10)
         self.assertTrue(r.contains(0, 0))
         self.assertTrue(r.contains(9, 9))
-        self.assertFalse(r.contains(10, 9))       # 右边界不算
+        self.assertFalse(r.contains(10, 9))       # the right edge does not count
         self.assertFalse(r.contains(0, 10))
 
     def test_clamp_is_virtual_but_clamp_local_is_not(self):
-        """这两个方法用错就是本次开发踩过的坑, 必须钉死。"""
+        """Mixing these two up is a trap we fell into during development, so it is pinned down."""
         r = Rect(1920, 0, 2560, 1440)
-        self.assertEqual(r.clamp(0, 0), (1920, 0))          # 虚拟坐标
-        self.assertEqual(r.clamp_local(0, 0), (0, 0))       # 本机坐标
+        self.assertEqual(r.clamp(0, 0), (1920, 0))          # virtual coordinates
+        self.assertEqual(r.clamp_local(0, 0), (0, 0))       # local coordinates
         self.assertEqual(r.clamp_local(-5, 99999), (0, 1439))
         self.assertEqual(r.clamp_local(99999, 5), (2559, 5))
 
@@ -154,11 +155,12 @@ class TestLayout(unittest.TestCase):
         self.assertIs(self.layout.neighbour(self.srv, RIGHT, 1919, 500),
                       self.cli)
         self.assertIsNone(self.layout.neighbour(self.srv, LEFT, 0, 500))
-        # client 右边没有东西
+        # nothing to the right of the client
         self.assertIsNone(self.layout.neighbour(self.cli, RIGHT, 4479, 500))
 
     def test_resolve_snaps_gap_to_nearest(self):
-        """两台机器之间有缝时, 光标要吸附到最近的矩形, 不能"消失"。"""
+        """With a gap between the two machines the cursor must snap to the nearest
+        rectangle instead of "disappearing"."""
         layout = Layout(make_server("win", 1920, 1080),
                         [make_client("deb", 2000, 0, 1920, 1080)])
         m, lx, ly, snapped = layout.resolve(1950, 500)
@@ -171,10 +173,11 @@ class TestLayout(unittest.TestCase):
         self.assertEqual((lx, ly), (0, 500))
 
     def test_resolve_prefers_current_machine_on_ties(self):
-        """缝隙里两边距离接近时优先保持当前机器(2 像素迟滞), 避免抖动。"""
+        """Inside a gap, with both sides about equally close, stay on the current
+        machine (2-pixel hysteresis) to avoid flapping."""
         layout = Layout(make_server("win", 100, 100),
                         [make_client("deb", 200, 0, 100, 100)])
-        # 149 离 server 右边缘 50 像素、离 client 左边缘 51 像素
+        # 149 is 50 pixels from the server's right edge, 51 from the client's left edge
         m, _, _, _ = layout.resolve(149, 50, prefer=layout.server)
         self.assertIs(m, layout.server)
         m, _, _, _ = layout.resolve(149, 50, prefer=layout.clients[0])
@@ -201,7 +204,8 @@ class TestLayout(unittest.TestCase):
 
 # ===========================================================================
 class TestRouter(unittest.TestCase):
-    """路由状态机: 这是"鼠标能不能自然跑到另一台电脑"的核心。"""
+    """Router state machine: the core of "can the mouse move naturally to the other
+    computer"."""
 
     def setUp(self):
         self.srv = make_server("win", 1920, 1080)
@@ -216,7 +220,8 @@ class TestRouter(unittest.TestCase):
         return [a.kind for a in actions]
 
     def test_motion_inside_server_produces_nothing(self):
-        """本机移动不需要任何动作: 光标已经动了, 转发模式也没开。"""
+        """Local motion needs no action at all: the cursor already moved and
+        forwarding mode is not on."""
         self.assertEqual(self.feed(Event.motion(500, 500, 5, 5)), [])
         self.assertFalse(self.router.remote)
 
@@ -228,7 +233,7 @@ class TestRouter(unittest.TestCase):
         self.assertTrue(self.router.remote)
 
     def test_edge_without_neighbour_stays(self):
-        """边上没有机器时不能切走(左边缘)。"""
+        """With no machine on that edge we must not switch away (left edge)."""
         actions = self.feed(Event.motion(0, 500, -20, 0))
         self.assertEqual(actions, [])
         self.assertFalse(self.router.remote)
@@ -241,7 +246,8 @@ class TestRouter(unittest.TestCase):
         self.assertEqual((ev.a, ev.b), (40, 560))
 
     def test_return_to_server_emits_local_not_enter(self):
-        """切回 server 必须是 local(关接管+放光标), 不能是 enter。"""
+        """Switching back to the server must be local (end takeover + drop the
+        cursor), never enter."""
         self.feed(Event.motion(1919, 500, 20, 0))
         actions = self.feed(Event.motion(0, 0, -3000, 0))
         self.assertEqual(self.kinds(actions), ["leave", "local"])
@@ -250,8 +256,8 @@ class TestRouter(unittest.TestCase):
 
     def test_leaving_client_releases_pressed_keys(self):
         self.feed(Event.motion(1919, 500, 20, 0))
-        self.feed(Event.key(0x1D, 0xA2, True))       # 按住 Ctrl
-        self.feed(Event.key(0x1E, 0x41, True))       # 再按 A
+        self.feed(Event.key(0x1D, 0xA2, True))       # hold Ctrl
+        self.feed(Event.key(0x1E, 0x41, True))       # then press A
         self.assertEqual(self.router.pressed_count(), 2)
         actions = self.feed(Event.motion(0, 0, -3000, 0))
         self.assertEqual(self.kinds(actions), ["leave", "local"])
@@ -261,7 +267,8 @@ class TestRouter(unittest.TestCase):
         self.assertEqual(self.router.pressed_count(), 0)
 
     def test_keys_go_to_active_machine_only(self):
-        """本机模式下按键不转发(系统已经处理过了), 远端模式下才转发。"""
+        """In local mode keys are not forwarded (the system already handled them);
+        only in remote mode are they."""
         self.assertEqual(self.feed(Event.key(0x1E, 0x41, True)), [])
         self.feed(Event.motion(1919, 500, 20, 0))
         actions = self.feed(Event.key(0x1E, 0x41, True))
@@ -281,31 +288,31 @@ class TestRouter(unittest.TestCase):
         router = Router(layout)
         router.on_event(Event.motion(1919, 500, 20, 0))          # -> deb
         self.assertEqual(router.active.name, "deb")
-        actions = router.on_event(Event.motion(0, 500, -4000, 0))  # 一路向左
+        actions = router.on_event(Event.motion(0, 500, -4000, 0))  # sweep all the way left
         self.assertEqual([a.kind for a in actions], ["leave", "enter"])
         self.assertEqual(actions[1].machine.name, "left")
 
     def test_force_local_from_remote(self):
         self.feed(Event.motion(1919, 500, 20, 0))
         self.feed(Event.key(0x1E, 0x41, True))
-        actions = self.router.force_local("测试", (700, 400))
+        actions = self.router.force_local("test", (700, 400))
         self.assertEqual(self.kinds(actions), ["leave", "local"])
         self.assertEqual((actions[1].x, actions[1].y), (700, 400))
         self.assertFalse(self.router.remote)
         self.assertEqual(self.router.pressed_count(), 0)
 
     def test_force_local_when_already_local_is_noop(self):
-        self.assertEqual(self.router.force_local("测试"), [])
+        self.assertEqual(self.router.force_local("test"), [])
 
     def test_force_local_clamps_park_point_into_server(self):
         self.feed(Event.motion(1919, 500, 20, 0))
-        actions = self.router.force_local("测试", (99999, -50))
+        actions = self.router.force_local("test", (99999, -50))
         self.assertEqual((actions[1].x, actions[1].y), (1919, 0))
 
     def test_lock_keeps_control_on_remote(self):
         self.feed(Event.motion(1919, 500, 20, 0))
         self.router.set_locked(True)
-        # 就算一路甩到很远也不换机器
+        # even flinging the cursor far away must not switch machines
         for _ in range(5):
             actions = self.feed(Event.motion(0, 0, -2000, 0))
             self.assertTrue(all(a.kind == "remote" for a in actions))
@@ -319,7 +326,8 @@ class TestRouter(unittest.TestCase):
         self.assertFalse(self.router.locked)
 
     def test_gap_layout_crosses_small_gap(self):
-        """两屏之间留了小缝(手写配置常见)也必须能过去和回来。"""
+        """A small gap between the screens (common in hand-written configs) must
+        still be crossable in both directions."""
         layout = Layout(make_server("win", 1920, 1080),
                         [make_client("deb", 2000, 0, 1920, 1080)])
         router = Router(layout)
@@ -332,7 +340,8 @@ class TestRouter(unittest.TestCase):
         self.assertEqual(router.active.name, "win")
 
     def test_huge_gap_is_not_crossed(self):
-        """缝太大就不该穿过去: 那多半是配置写错了, 强行跨屏会更让人困惑。"""
+        """Too large a gap must not be crossed: that is usually a config mistake,
+        and forcing a screen jump anyway would be even more confusing."""
         layout = Layout(make_server("win", 1920, 1080),
                         [make_client("deb", 5000, 0, 1920, 1080)])
         router = Router(layout)
@@ -354,7 +363,7 @@ class TestKeys(unittest.TestCase):
         self.assertEqual(K.evdev_for(0x48, 0x26, True), 103)     # KEY_UP
         self.assertEqual(K.evdev_for(0x1C, 0x0D, True), 96)      # KEY_KPENTER
         self.assertEqual(K.evdev_for(0x1D, 0xA2, False), 29)     # KEY_LEFTCTRL
-        self.assertEqual(K.evdev_for(0x45, 0x13, False), 119)    # Pause 特判
+        self.assertEqual(K.evdev_for(0x45, 0x13, False), 119)    # Pause special case
         self.assertIsNone(K.evdev_for(0xFE))
 
     def test_modifier_and_toggle_detection(self):
@@ -367,11 +376,12 @@ class TestKeys(unittest.TestCase):
         self.assertEqual(K.parse_key_name("q"), (0x10, False))
         self.assertEqual(K.parse_key_name("CTRL"), (0x1D, False))
         self.assertEqual(K.parse_key_name("escape"), (0x01, False))
-        # F11/F12 不在连续区间里, 曾经被错映射成 NumLock/ScrollLock
+        # F11/F12 are not in the contiguous range and were once mis-mapped to
+        # NumLock/ScrollLock
         self.assertEqual(K.parse_key_name("f10"), (0x44, False))
         self.assertEqual(K.parse_key_name("f11"), (0x57, False))
         self.assertEqual(K.parse_key_name("f12"), (0x58, False))
-        self.assertIsNone(K.parse_key_name("没有这个键"))
+        self.assertIsNone(K.parse_key_name("no-such-key"))
 
     def test_key_name_for_logging(self):
         self.assertEqual(K.key_name(0x1E), "A")
@@ -393,10 +403,10 @@ class TestHotkey(unittest.TestCase):
     def test_fires_only_with_all_modifiers(self):
         hk = Hotkey("ctrl+alt+f12")
         self.assertFalse(hk.feed(Event.key(0x1D, 0, True)))       # Ctrl
-        self.assertFalse(hk.feed(Event.key(0x58, 0, True)))       # 缺 Alt
+        self.assertFalse(hk.feed(Event.key(0x58, 0, True)))       # Alt missing
         self.assertFalse(hk.feed(Event.key(0x58, 0, False)))
         self.assertFalse(hk.feed(Event.key(0x38, 0, True)))       # Alt
-        self.assertTrue(hk.feed(Event.key(0x58, 0, True)))        # 齐了
+        self.assertTrue(hk.feed(Event.key(0x58, 0, True)))        # all modifiers held
 
     def test_modifier_release_resets_state(self):
         hk = Hotkey("ctrl+alt+f12")
@@ -410,7 +420,7 @@ class TestHotkey(unittest.TestCase):
         hk.feed(Event.key(0x1D, 0, True))
         hk.feed(Event.key(0x38, 0, True))
         self.assertTrue(hk.feed(Event.key(0x10, 0, True)))
-        self.assertFalse(hk.feed(Event.key(0x10, 0, True)))       # 自动重复
+        self.assertFalse(hk.feed(Event.key(0x10, 0, True)))       # auto-repeat
 
     def test_ignores_non_key_events(self):
         hk = Hotkey("ctrl+alt+q")
@@ -423,14 +433,16 @@ class TestHotkey(unittest.TestCase):
 
     def test_make_hotkeys_rejects_bad_spec(self):
         with self.assertRaises(HotkeyError):
-            make_hotkeys("ctrl+alt+不存在", "")
+            make_hotkeys("ctrl+alt+nonexistent", "")
 
 
 # ===========================================================================
 class TestConfig(unittest.TestCase):
     def setUp(self):
-        # 直接在工作目录里用唯一文件名, 不建子目录: 受限环境(Windows 沙箱)
-        # 里"能建目录"和"能往目录里写文件"是两回事
+        # Use a unique file name directly in the working directory and do not
+        # create a subdirectory: in a restricted environment (Windows sandbox)
+        # "can create a directory" and "can write a file into it" are two
+        # different things
         from crosspc.util import pick_writable_dir, scratch_prefix
         self.tmp = pick_writable_dir()
         self.prefix = scratch_prefix("test")
@@ -454,7 +466,7 @@ class TestConfig(unittest.TestCase):
     def test_save_load_roundtrip(self):
         cfg = Config.defaults(self.path)
         cfg.name = "win11"
-        cfg.token = "秘密"
+        cfg.token = "secret"
         cfg.clients = [ClientEntry(name="debian", host="192.168.1.50",
                                    rect=Rect(1920, 0, 2560, 1440))]
         cfg.clipboard_poll_ms = 500
@@ -462,7 +474,7 @@ class TestConfig(unittest.TestCase):
         cfg.save()
         again = Config.load(self.path)
         self.assertEqual(again.name, "win11")
-        self.assertEqual(again.token, "秘密")
+        self.assertEqual(again.token, "secret")
         self.assertEqual(again.clipboard_poll_ms, 500)
         self.assertEqual(again.clients[0].rect, Rect(1920, 0, 2560, 1440))
         self.assertEqual(again.server_screen, (1920, 1080))
@@ -478,7 +490,7 @@ class TestConfig(unittest.TestCase):
 
     def test_bad_json_gives_friendly_error(self):
         with open(self.path, "w", encoding="utf-8") as fh:
-            fh.write("{ 这不是 json")
+            fh.write("{ this is not json")
         with self.assertRaises(ConfigError):
             Config.load(self.path)
 
@@ -513,7 +525,7 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(layout.server.rect, Rect(0, 0, 1920, 1080))
         a, b = layout.clients
         self.assertEqual(a.rect, Rect(1920, 0, 2560, 1440))
-        self.assertEqual(b.rect, Rect(4480, 0, 1920, 1080))   # 依次往右摆
+        self.assertEqual(b.rect, Rect(4480, 0, 1920, 1080))   # placed to the right, one after another
         self.assertEqual(b.host, "10.0.0.9")
 
     def test_build_layout_skips_disabled(self):
@@ -526,7 +538,7 @@ class TestConfig(unittest.TestCase):
         cfg = Config.from_dict({"clients": [{"name": "a"}]})
         cfg.remember_size("a", 2560, 1440)
         self.assertEqual(cfg.clients[0].rect, Rect(0, 0, 2560, 1440))
-        cfg.remember_size("a", 800, 600)          # 已经有了, 不该被改小
+        cfg.remember_size("a", 800, 600)          # already known, must not be shrunk
         self.assertEqual(cfg.clients[0].rect, Rect(0, 0, 2560, 1440))
 
     def test_size_cache_roundtrip(self):
@@ -544,7 +556,8 @@ class TestConfig(unittest.TestCase):
 
 # ===========================================================================
 class TestClipboardSync(unittest.TestCase):
-    """剪辑板同步最容易出的问题是"回环": 对端写进来的内容又被发回去。"""
+    """The classic clipboard sync bug is the echo loop: content written in by the
+    peer gets sent straight back."""
 
     PNG_A = b"\x89PNG\r\n\x1a\n" + b"A" * 64
     PNG_B = b"\x89PNG\r\n\x1a\n" + b"B" * 64
@@ -560,7 +573,7 @@ class TestClipboardSync(unittest.TestCase):
         sync._last_hash = sync._hash(sync._read())
         return sync
 
-    # ------------------------------------------------------------ 文本
+    # ------------------------------------------------------------ text
     def test_local_text_change_is_sent_once(self):
         sync = self.make()
         self.backend.clipboard = "hello"
@@ -581,11 +594,11 @@ class TestClipboardSync(unittest.TestCase):
         sync = self.make()
         sync.apply_remote("text", "from remote")
         sync.tick()
-        sync._paused_until = 0.0        # 跳过"刚写完剪辑板"的短暂抑制窗口
-        self.backend.clipboard = "本地新内容"
+        sync._paused_until = 0.0        # skip the brief suppression window after a clipboard write
+        self.backend.clipboard = "new local content"
         self.backend._clip_rev += 1
         sync.tick()
-        self.assertEqual(sync.calls, [("text", "本地新内容")])
+        self.assertEqual(sync.calls, [("text", "new local content")])
 
     def test_oversize_text_is_skipped(self):
         sync = self.make(max_bytes=10)
@@ -594,7 +607,7 @@ class TestClipboardSync(unittest.TestCase):
         sync.tick()
         self.assertEqual(sync.calls, [])
 
-    # ------------------------------------------------------------ 图片
+    # ------------------------------------------------------------ image
     def test_local_image_is_sent(self):
         sync = self.make()
         self.backend.clipboard_image = self.PNG_A
@@ -628,17 +641,18 @@ class TestClipboardSync(unittest.TestCase):
         self.assertEqual(sync.calls, [])
 
     def test_text_is_preferred_by_default(self):
-        """文本和图片同时在: 默认发文本(图表从 Excel 复制过来只是一小段字)。"""
+        """When text and an image are both present, text is sent by default (a chart
+        copied out of Excel is just a short string)."""
         sync = self.make()
-        self.backend.clipboard = "表格文字"
+        self.backend.clipboard = "table text"
         self.backend.clipboard_image = self.PNG_A
         self.backend._clip_rev += 1
         sync.tick()
-        self.assertEqual(sync.calls, [("text", "表格文字")])
+        self.assertEqual(sync.calls, [("text", "table text")])
 
     def test_prefer_image_when_configured(self):
         sync = self.make(prefer_image=True)
-        self.backend.clipboard = "表格文字"
+        self.backend.clipboard = "table text"
         self.backend.clipboard_image = self.PNG_A
         self.backend._clip_rev += 1
         sync.tick()
@@ -646,19 +660,20 @@ class TestClipboardSync(unittest.TestCase):
 
     def test_text_fallback_when_no_image(self):
         sync = self.make(prefer_image=True)
-        self.backend.clipboard = "只有文字"
+        self.backend.clipboard = "text only"
         self.backend._clip_rev += 1
         sync.tick()
-        self.assertEqual(sync.calls, [("text", "只有文字")])
+        self.assertEqual(sync.calls, [("text", "text only")])
 
     def test_remote_image_when_images_disabled_is_ignored(self):
         sync = self.make(images=False)
         sync.apply_remote("image", self.PNG_B)
         self.assertIsNone(self.backend.clipboard_image)
 
-    # ------------------------------------------------------------ 平台行为
+    # ------------------------------------------------------------ platform behaviour
     def test_no_revision_platform_slows_polling(self):
-        """Linux 没有剪辑板序号: 自动把轮询放宽, 免得每秒 fork 一堆进程。"""
+        """Linux has no clipboard revision number: relax the polling automatically so
+        that we do not fork a pile of processes every second."""
         backend = FakeBackend()
         backend.clipboard_revision = lambda: None     # type: ignore[assignment]
         sync = ClipboardSync(backend, lambda k, p: None, log=_quiet_log(),
@@ -677,7 +692,7 @@ class TestClipboardSync(unittest.TestCase):
 
 
 class TestClipboardReadPreference(unittest.TestCase):
-    """backend.clipboard_read() 的取用顺序(纯逻辑, 用假后端验证)。"""
+    """The preference order of backend.clipboard_read() (pure logic, verified with the fake backend)."""
 
     def test_text_first_by_default(self):
         be = FakeBackend()
@@ -712,7 +727,8 @@ class TestClipboardReadPreference(unittest.TestCase):
         self.assertIsNone(be.clipboard_read(16))
 
     def test_backend_without_images(self):
-        # 子类把属性压成 False(基类是只读 property, 实例上赋不了值)
+        # the subclass pins the attribute to False (the base class uses a read-only
+        # property, so it cannot be assigned on an instance)
         no_image = type("NoImageFake", (FakeBackend,),
                         {"supports_clipboard_images": False})()
         no_image.clipboard_image = b"\x89PNG\r\n\x1a\nA"
@@ -727,7 +743,7 @@ def _quiet_log():
 # ===========================================================================
 class TestUtil(unittest.TestCase):
     def test_norm_and_denorm(self):
-        r = Rect(-1920, -200, 4480, 1440)       # 副屏在主屏左侧
+        r = Rect(-1920, -200, 4480, 1440)       # secondary screen left of the primary one
         self.assertEqual(norm_from_desktop(r, -1000, 100), (920, 300))
         self.assertEqual(desktop_from_norm(r, 920, 300), (-1000, 100))
 
@@ -740,7 +756,8 @@ class TestUtil(unittest.TestCase):
 
 
 class TestLogFile(unittest.TestCase):
-    """--log-file: 真机联调时用户在自己窗口里跑, 我们只能事后看日志。"""
+    """--log-file: on a real machine the user runs it in their own window, so all we
+    can do is read the log afterwards."""
 
     def setUp(self):
         from crosspc.util import pick_writable_dir, scratch_prefix
@@ -760,19 +777,20 @@ class TestLogFile(unittest.TestCase):
         from crosspc.util import Log
         buf = io.StringIO()
         log = Log("debug", stream=buf, file_path=self.path)
-        log.info("你好")
-        log.warn("注意")
-        log.plain("报告一行(不带时间戳)")
-        log.debug("debug 也该进去")
+        log.info("hello")
+        log.warn("warning")
+        log.plain("report line (no timestamp)")
+        log.debug("debug should go in too")
         log.close()
         with open(self.path, "r", encoding="utf-8") as fh:
             content = fh.read()
-        self.assertIn("你好", buf.getvalue())
-        self.assertIn("你好", content)
-        self.assertIn("注意", content)
-        self.assertIn("报告一行(不带时间戳)", content)
-        self.assertIn("debug 也该进去", content)
-        # 文件里每条都该带时间戳+级别(便于对时间); plain 除外
+        self.assertIn("hello", buf.getvalue())
+        self.assertIn("hello", content)
+        self.assertIn("warning", content)
+        self.assertIn("report line (no timestamp)", content)
+        self.assertIn("debug should go in too", content)
+        # every line in the file should carry a timestamp + level (to match up
+        # times); plain is the exception
         self.assertIn("INFO", content)
         self.assertIn("WARN", content)
 
@@ -780,37 +798,38 @@ class TestLogFile(unittest.TestCase):
         import io
         from crosspc.util import Log
         log = Log("warn", stream=io.StringIO(), file_path=self.path)
-        log.info("这条不该出现")
-        log.error("这条要出现")
+        log.info("this line must not appear")
+        log.error("this line must appear")
         log.close()
         with open(self.path, "r", encoding="utf-8") as fh:
             content = fh.read()
-        self.assertNotIn("这条不该出现", content)
-        self.assertIn("这条要出现", content)
+        self.assertNotIn("this line must not appear", content)
+        self.assertIn("this line must appear", content)
 
     def test_appends_instead_of_overwriting(self):
         import io
         from crosspc.util import Log
-        for text in ("第一轮", "第二轮"):
+        for text in ("first round", "second round"):
             log = Log("info", stream=io.StringIO(), file_path=self.path)
             log.info(text)
             log.close()
         with open(self.path, "r", encoding="utf-8") as fh:
             content = fh.read()
-        self.assertIn("第一轮", content)
-        self.assertIn("第二轮", content)
+        self.assertIn("first round", content)
+        self.assertIn("second round", content)
 
     def test_unwritable_path_does_not_crash(self):
-        """日志写不了不能影响主功能(用户可能在只读目录里跑)。"""
+        """A log that cannot be written must not affect the main functionality (the
+        user may run it from a read-only directory)."""
         import io
         from crosspc.util import Log
-        bad = os.path.join(self.dir, "不存在的子目录" + str(time.time()),
+        bad = os.path.join(self.dir, "missing-subdir-" + str(time.time()),
                            "x.log")
         buf = io.StringIO()
         log = Log("info", stream=buf, file_path=bad)
-        log.info("仍然要能打出来")
+        log.info("must still be printed")
         log.close()
-        self.assertIn("仍然要能打出来", buf.getvalue())
+        self.assertIn("must still be printed", buf.getvalue())
 
     def test_creates_parent_directory(self):
         import io

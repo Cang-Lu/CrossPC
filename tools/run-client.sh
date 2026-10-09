@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# CrossPC client(Debian, 没键鼠的那台)启动器
+# CrossPC client launcher (Debian, the machine without keyboard and mouse)
 #
-# 用法:
-#   ./tools/run-client.sh                      # 用 UDP 自动发现 server
-#   ./tools/run-client.sh --host 192.168.1.10  # 指定 server 地址
+# Usage:
+#   ./tools/run-client.sh                      # find the server over UDP
+#   ./tools/run-client.sh --host 192.168.1.10  # use a fixed server address
 #   CROSSPC_SCREEN=2560x1440 ./tools/run-client.sh --host 192.168.1.10
 #
-# 如果报找不到 python3 或 tkinter: sudo bash tools/install_linux.sh
+# If python3 or tkinter is reported missing: sudo bash tools/install_linux.sh
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 if ! command -v python3 >/dev/null 2>&1; then
-    echo "找不到 python3, 请先运行: sudo bash tools/install_linux.sh" >&2
+    echo "python3 not found; run this first: sudo bash tools/install_linux.sh" >&2
     exit 1
 fi
 

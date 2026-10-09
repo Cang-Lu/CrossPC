@@ -1,18 +1,21 @@
-"""CrossPC —— 局域网内共享一套鼠标键盘的 KVM 工具。
+"""CrossPC -- a KVM tool that shares one keyboard and mouse across a LAN.
 
-角色:
-    server  接了物理键鼠的机器。捕获输入, 按"虚拟桌面"的位置关系决定
-            是本机执行还是转发给 client, 并负责剪辑板广播。
-    client  没有键鼠的机器。接收远端事件并注入本机, 同时同步剪辑板。
+Roles:
+    server  the machine with the physical keyboard and mouse. It captures input
+            and uses the relative positions in the "virtual desktop" to decide
+            whether to run it locally or forward it to a client, and it is
+            responsible for broadcasting the clipboard.
+    client  a machine with no keyboard or mouse of its own. It receives remote
+            events and injects them locally, and also syncs the clipboard.
 
-本包只依赖 Python 3.8+ 标准库:
-    Windows 端   ctypes 直接调用 user32/kernel32
-    Linux 端     ctypes 直接调用 libX11/libXtst, 或写 /dev/uinput
+This package depends only on the Python 3.8+ standard library:
+    Windows     ctypes calls user32/kernel32 directly
+    Linux       ctypes calls libX11/libXtst directly, or writes /dev/uinput
 """
 
 __all__ = ["__version__", "PROTOCOL_VERSION"]
 
 __version__ = "0.1.0"
 
-#: 线协议版本, 两端必须一致
+#: Wire protocol version; both ends must agree on it
 PROTOCOL_VERSION = 1

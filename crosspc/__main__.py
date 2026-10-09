@@ -1,4 +1,4 @@
-"""python -m crosspc 的入口。"""
+"""Entry point for python -m crosspc."""
 import sys
 
 from .cli import main

@@ -1,11 +1,12 @@
-"""Linux 后端纯逻辑单元测试(在 Windows 上也能全绿)。
+"""Linux backend pure-logic unit tests (all green on Windows too).
 
-原则: **绝不真的打开 X11 或 /dev/uinput**。这里只测"不需要设备的那一半":
-键码/按键映射、input_event 的字节编码、像素->绝对刻度换算、剪辑板工具挑选、
-以及"在 Windows 上 prepare() 必须抛 BackendError 而不是别的异常"。
+Principle: **never really open X11 or /dev/uinput**. Only the half that needs no
+device is tested here: scancode/key mapping, input_event byte encoding, pixel to
+absolute scale conversion, clipboard tool selection, and "on Windows prepare()
+must raise BackendError and nothing else".
 
-这样这些逻辑在 Windows 开发机上就能被保护, 上 Debian 只剩下"设备真的能打开
-吗"这一层需要人工验证。
+That way this logic is protected on a Windows development machine, and moving to
+Debian leaves only "can the device actually be opened" for manual verification.
 """
 from __future__ import annotations
 
@@ -26,27 +27,29 @@ from crosspc.layout import Rect                                      # noqa: E40
 
 # ===========================================================================
 class TestKeyTables(unittest.TestCase):
-    """keys.py 是冻结契约, 这里同时也验证我们复用它的方式是对的。"""
+    """keys.py is a frozen contract; this also verifies that we reuse it correctly."""
 
     def test_letter_a(self):
-        # 普通区 evdev 码 == 扫描码(KEY_A = 30 = 0x1E)
+        # in the normal range the evdev code == the scancode (KEY_A = 30 = 0x1E)
         self.assertEqual(keys.evdev_for(0x1E), 30)
         self.assertEqual(keys.keysym_for(0x1E), ord("a"))
 
     def test_extended_up_arrow(self):
-        # 上箭头: 扫描码 0x48 + E0 -> KEY_UP=103, keysym=0xFF52
+        # up arrow: scancode 0x48 + E0 -> KEY_UP=103, keysym=0xFF52
         self.assertEqual(keys.evdev_for(0x48, 0, True), 103)
         self.assertEqual(keys.keysym_for(0x48, True), keys.XK_UP)
-        # 同一个扫描码不带扩展时是数字键盘 8(普通表), 两者不能混
+        # the same scancode without the extended prefix is keypad 8 (normal table),
+        # so the two must not be mixed up
         self.assertNotEqual(keys.evdev_for(0x48, 0, False), 103)
 
     def test_extended_kp_enter(self):
-        # E0 1C = 小键盘回车 -> KEY_KPENTER=96, keysym=XK_KP_ENTER
+        # E0 1C = keypad enter -> KEY_KPENTER=96, keysym=XK_KP_ENTER
         self.assertEqual(keys.evdev_for(0x1C, 0, True), 96)
         self.assertEqual(keys.keysym_for(0x1C, True), keys.XK_KP_ENTER)
 
     def test_vk_pause(self):
-        # VK_PAUSE 在扫描码表里对不上(不同键盘发法不同), 走 vk 特判
+        # VK_PAUSE does not line up in the scancode table (different keyboards send
+        # it in different ways), so it goes through the vk special case
         self.assertEqual(keys.evdev_for(0x45, keys.VK_PAUSE), 119)
         self.assertEqual(keys.evdev_for(0xE1, keys.VK_PAUSE), 119)
 
@@ -60,26 +63,27 @@ class TestKeyTables(unittest.TestCase):
         self.assertEqual(keys.evdev_for(0x37, 0, True), 99)
 
     def test_printscreen_nonextended_uses_vk_fallback(self):
-        """非扩展的 0x37 必须靠 VK_SNAPSHOT 兜底到 KEY_SYSRQ(99)。
+        """The non-extended 0x37 must fall back to KEY_SYSRQ (99) through VK_SNAPSHOT.
 
-        这里曾经有一个真 bug: `0x01 <= scancode <= 0x58` 的区间直映挡在
-        VK 兜底之前, 于是 PrintScreen 被当成扫描码 0x37 直接返回 55
-        (KEY_KPASTERISK)。主开发者已修 keys.py, 这条测试就是那个修复的锁。
+        There used to be a real bug here: the direct `0x01 <= scancode <= 0x58`
+        range mapping sat in front of the VK fallback, so PrintScreen was treated as
+        scancode 0x37 and returned 55 (KEY_KPASTERISK). The lead developer has fixed
+        keys.py; this test is the lock on that fix.
         """
         self.assertEqual(keys.evdev_for(0x37, keys.VK_SNAPSHOT, False),
                          keys.EVDEV_SYSRQ)
-        # 普通区仍然是"evdev 码 == 扫描码"
+        # the normal range is still "evdev code == scancode"
         self.assertEqual(keys.evdev_for(0x1E, 0x41, False), 0x1E)
         self.assertEqual(keys.evdev_for(0x37, 0, False), 0x37)
 
 
 # ===========================================================================
 class TestUinputEventEncoding(unittest.TestCase):
-    """24 字节 input_event 的编码 -> 解码回 (type, code, value)。"""
+    """Encoding of the 24-byte input_event -> decode back to (type, code, value)."""
 
     @staticmethod
     def _decode(blob: bytes):
-        # "=qqHHi" 与 struct input_event 一致(见 linux_uinput.pack_event 的注释)
+        # "=qqHHi" matches struct input_event (see the comment in linux_uinput.pack_event)
         sec, usec, type_, code, value = struct.unpack("=qqHHi", blob)
         return sec, usec, type_, code, value
 
@@ -106,14 +110,15 @@ class TestUinputEventEncoding(unittest.TestCase):
                                                 linux_uinput.ABS_X, 65535))
 
     def test_field_widths(self):
-        # type/code 是 u16, value 是 s32: 用 0xFFFF 边界验证没有被符号扩展
+        # type/code are u16 and value is s32: the 0xFFFF boundary verifies that no
+        # sign extension happened
         blob = linux_uinput.pack_event(0xFFFF, 0xFFFF, 2147483647,
                                        sec=1, usec=1)
         _, _, type_, code, value = self._decode(blob)
         self.assertEqual((type_, code, value), (0xFFFF, 0xFFFF, 2147483647))
 
     def test_usec_overflow_is_normalized(self):
-        # 浮点时钟可能给出 usec >= 1000000, 内核会拒绝这种时间戳
+        # a float clock can yield usec >= 1000000, and the kernel rejects such timestamps
         blob = linux_uinput.pack_event(1, 1, 1, sec=10, usec=1500000)
         sec, usec, _, _, _ = self._decode(blob)
         self.assertEqual(sec, 11)
@@ -122,7 +127,7 @@ class TestUinputEventEncoding(unittest.TestCase):
     def test_default_timestamp_is_recent(self):
         blob = linux_uinput.pack_event(1, 1, 1)
         sec, usec, _, _, _ = self._decode(blob)
-        self.assertGreater(sec, 1600000000)          # 2020 年以后
+        self.assertGreater(sec, 1600000000)          # after 2020
         self.assertGreaterEqual(usec, 0)
         self.assertLess(usec, 1000000)
 
@@ -130,7 +135,7 @@ class TestUinputEventEncoding(unittest.TestCase):
         # struct uinput_setup = input_id(8) + name(80) + ff_effects_max(4)
         self.assertEqual(linux_uinput.UINPUT_SETUP_SIZE, 92)
         self.assertEqual(linux_uinput.UINPUT_USER_DEV_SIZE, 1372)
-        # type 字段必须是 16 位, 否则 u16 会被 kernel 当成垃圾
+        # the type field must be 16 bits, otherwise the kernel reads the u16 as garbage
         self.assertEqual(linux_uinput._InputEvent.type.size, 2)
         self.assertEqual(linux_uinput._InputEvent.code.size, 2)
         self.assertEqual(linux_uinput._InputEvent.value.size, 4)
@@ -138,14 +143,14 @@ class TestUinputEventEncoding(unittest.TestCase):
 
 # ===========================================================================
 class TestIoctlConstants(unittest.TestCase):
-    """ioctl 编号是手算的, 必须和 linux/uinput.h 对得上。"""
+    """The ioctl numbers are computed by hand and must line up with linux/uinput.h."""
 
     def test_known_values(self):
         self.assertEqual(linux_uinput.UI_DEV_CREATE, 0x5501)
         self.assertEqual(linux_uinput.UI_DEV_DESTROY, 0x5502)
         self.assertEqual(linux_uinput.UI_DEV_SETUP, 0x405C5503)
-        # UI_SET_* 的 nr 从 100 起(不是 4!), 这几个值可以直接和
-        # /usr/include/linux/uinput.h 对照
+        # the UI_SET_* nr values start at 100 (not 4!); these numbers can be
+        # compared directly against /usr/include/linux/uinput.h
         self.assertEqual(linux_uinput.UI_SET_EVBIT, 0x40045564)
         self.assertEqual(linux_uinput.UI_SET_KEYBIT, 0x40045565)
         self.assertEqual(linux_uinput.UI_SET_RELBIT, 0x40045566)
@@ -153,15 +158,15 @@ class TestIoctlConstants(unittest.TestCase):
         self.assertEqual(linux_uinput.UI_SET_PROPBIT, 0x4004556E)
 
     def test_set_bits_are_consecutive(self):
-        # uinput.h 里 UI_SET_KEYBIT..UI_SET_PROPBIT 是逐个 +1 的, 这条断言
-        # 能在有人"顺手改一个 nr"时立刻抓住
+        # in uinput.h UI_SET_KEYBIT..UI_SET_PROPBIT step by +1 each, and this
+        # assertion catches anyone "just nudging one nr"
         self.assertEqual(linux_uinput.UI_SET_KEYBIT, linux_uinput.UI_SET_EVBIT + 1)
         self.assertEqual(linux_uinput.UI_SET_RELBIT, linux_uinput.UI_SET_EVBIT + 2)
         self.assertEqual(linux_uinput.UI_SET_ABSBIT, linux_uinput.UI_SET_EVBIT + 3)
         self.assertEqual(linux_uinput.UI_SET_PROPBIT, linux_uinput.UI_SET_EVBIT + 10)
 
     def test_macro_formula(self):
-        # _IOW('U', 100, int) 手工展开 = (1<<30)|(4<<16)|(0x55<<8)|100
+        # _IOW('U', 100, int) expanded by hand = (1<<30)|(4<<16)|(0x55<<8)|100
         self.assertEqual(linux_uinput.UI_SET_EVBIT,
                          (1 << 30) | (4 << 16) | (0x55 << 8) | 100)
 
@@ -186,7 +191,7 @@ class TestButtonMapping(unittest.TestCase):
 
 # ===========================================================================
 class TestCoordinateMapping(unittest.TestCase):
-    """像素 -> 0..65535 绝对刻度。边界必须钉死, 否则屏幕边缘点不到。"""
+    """Pixel -> 0..65535 absolute scale. The boundaries must be pinned down, otherwise the screen edge cannot be reached."""
 
     def test_1920x1080_boundaries(self):
         f = linux_uinput.pixel_to_abs
@@ -214,7 +219,8 @@ class TestCoordinateMapping(unittest.TestCase):
             prev = ax
 
     def test_degenerate_screen_size(self):
-        # 尺寸非法时退化成直通, 但不能抛异常(诊断路径会走到)
+        # with an invalid size it degrades to pass-through, but must not raise
+        # (the diagnostics path does reach this)
         self.assertEqual(linux_uinput.pixel_to_abs(10, 20, 0, 0), (10, 20))
         self.assertEqual(linux_uinput.pixel_to_abs(10, 20, 1, 1), (0, 0))
 
@@ -227,15 +233,16 @@ class TestCoordinateMapping(unittest.TestCase):
 class TestKeyboardRegistration(unittest.TestCase):
     def test_all_table_codes_present(self):
         codes = linux_uinput.keyboard_evdev_codes()
-        # 表里出现过的每个扫描码都必须被注册, 否则兼容性上会出现"哑键"
+        # every scancode that appears in the table must be registered, otherwise
+        # compatibility suffers from "dead keys"
         for scan in keys.SCAN_TO_KEYSYM:
             code = keys.evdev_for(scan, 0, False)
             if code:
-                self.assertIn(code, codes, "扫描码 0x%02X" % scan)
+                self.assertIn(code, codes, "scancode 0x%02X" % scan)
         for scan in keys.EXT_SCAN_TO_EVDEV:
             code = keys.evdev_for(scan, 0, True)
             if code:
-                self.assertIn(code, codes, "扩展扫描码 0x%02X" % scan)
+                self.assertIn(code, codes, "extended scancode 0x%02X" % scan)
 
     def test_buttons_and_special_keys(self):
         codes = linux_uinput.keyboard_evdev_codes()
@@ -252,7 +259,7 @@ class TestKeyboardRegistration(unittest.TestCase):
 
 # ===========================================================================
 class TestClipboardToolChoice(unittest.TestCase):
-    """choose_clipboard_tool(env, which) 是纯函数, 4 种组合。"""
+    """choose_clipboard_tool(env, which) is a pure function with 4 combinations."""
 
     @staticmethod
     def _which(*available):
@@ -278,7 +285,8 @@ class TestClipboardToolChoice(unittest.TestCase):
         self.assertIsNone(choose_clipboard_tool({"DISPLAY": ":0"}, self._which()))
 
     def test_xsel_needs_x11_hint(self):
-        # 纯 Wayland 且没有显示变量时不要瞎猜 xsel(它连不上 Wayland 剪辑板)
+        # pure Wayland with no display variables: do not guess xsel (it cannot reach
+        # the Wayland clipboard)
         self.assertIsNone(choose_clipboard_tool({}, self._which("xsel")))
         self.assertEqual(choose_clipboard_tool({"XDG_SESSION_TYPE": "x11"},
                                                self._which("xsel")), "xsel")
@@ -317,7 +325,7 @@ class TestScreenSpecParsing(unittest.TestCase):
 
 # ===========================================================================
 class TestBackendContract(unittest.TestCase):
-    """能力声明必须和任务约定一致: Linux 只能当 client。"""
+    """Capability declarations must match the task contract: Linux can only be a client."""
 
     def test_capabilities(self):
         b = LinuxBackend()
@@ -336,29 +344,31 @@ class TestBackendContract(unittest.TestCase):
             b.set_forwarding(True)
 
     def test_prepare_never_leaks_raw_exceptions(self):
-        """prepare() 的契约: 要么成功, 要么抛 BackendError。
+        """The prepare() contract: either it succeeds, or it raises BackendError.
 
-        上层只 catch BackendError, 所以 FileNotFoundError / OSError / 权限错误
-        这类原生异常绝不能漏出去。开发机(Windows)上必然抛; 真 Linux 上如果
-        /dev/uinput 可写就会成功(并且真的建出一个虚拟指针设备, close() 会销毁),
-        两种都算合规 —— 这条断言的是契约, 不是某个平台的结果。
+        The layer above only catches BackendError, so native exceptions such as
+        FileNotFoundError / OSError / permission errors must never escape. On the
+        development machine (Windows) it necessarily raises; on real Linux it
+        succeeds if /dev/uinput is writable (and really creates a virtual pointer
+        device, which close() destroys). Both are compliant -- this asserts the
+        contract, not the outcome on some particular platform.
         """
         for prefer in ("uinput", "x11", None):
             b = LinuxBackend(prefer=prefer)
             try:
                 b.prepare()
             except BackendError as exc:
-                self.assertTrue(str(exc), "错误信息不能为空")
+                self.assertTrue(str(exc), "the error message must not be empty")
             except Exception as exc:                 # pragma: no cover
-                self.fail("prepare(prefer=%r) 抛了 %s 而不是 BackendError: %s"
+                self.fail("prepare(prefer=%r) raised %s instead of BackendError: %s"
                           % (prefer, type(exc).__name__, exc))
             finally:
                 b.close()
 
     @unittest.skipUnless(sys.platform == "win32",
-                         "这条断言的是 Windows 上的必然结果")
+                         "this asserts the guaranteed outcome on Windows")
     def test_prepare_raises_on_windows(self):
-        """Windows 上没有 /dev/uinput 也没有 X, 三种 prefer 都必须抛 BackendError。"""
+        """Windows has neither /dev/uinput nor X, so all three prefer values must raise BackendError."""
         for prefer in ("uinput", "x11", None):
             b = LinuxBackend(prefer=prefer)
             with self.assertRaises(BackendError):
@@ -366,9 +376,9 @@ class TestBackendContract(unittest.TestCase):
             b.close()
 
     def test_prepare_x11_without_display_raises(self):
-        """没有 DISPLAY 时, 明确要求 X11 注入必须给出 BackendError 而不是崩。"""
+        """With no DISPLAY, explicitly asking for X11 injection must give a BackendError rather than crashing."""
         if os.environ.get("DISPLAY"):
-            self.skipTest("当前有 DISPLAY, 这条测的是无 X 时的行为")
+            self.skipTest("DISPLAY is set here; this case tests the behaviour without X")
         b = LinuxBackend(prefer="x11")
         with self.assertRaises(BackendError):
             b.prepare()
@@ -383,7 +393,7 @@ class TestBackendContract(unittest.TestCase):
     def test_close_is_idempotent_without_prepare(self):
         b = LinuxBackend()
         b.close()
-        b.close()                                    # 不许抛
+        b.close()                                    # must not raise
 
     def test_inject_without_prepare_raises_backend_error(self):
         b = LinuxBackend()
@@ -409,7 +419,7 @@ class TestBackendContract(unittest.TestCase):
         self.assertIsNone(LinuxBackend().clipboard_revision())
 
     def test_probe_returns_tuples(self):
-        # probe() 自己不许抛异常, 而且每项都是 (str, bool, str)
+        # probe() itself must not raise, and every item is (str, bool, str)
         items = LinuxBackend().probe()
         self.assertTrue(items)
         for item in items:
@@ -419,24 +429,25 @@ class TestBackendContract(unittest.TestCase):
             self.assertIsInstance(item[2], str)
             self.assertTrue(item[2], item)
         joined = " ".join(i[2] for i in items)
-        self.assertIn("client", joined)              # 角色说明必须在
+        self.assertIn("client", joined)              # the role description must be there
 
     def test_uinput_available_never_raises(self):
         ok, why = linux_uinput.UInputInjector.available()
         self.assertIsInstance(ok, bool)
         self.assertTrue(why)
         if not sys.platform.startswith("linux"):
-            self.assertFalse(ok)                     # Windows 上必然不可用
+            self.assertFalse(ok)                     # necessarily unavailable on Windows
 
     def test_uinput_module_import_has_no_side_effects(self):
-        # 顶层 import 过这个模块了(本文件开头), 没炸就说明没有加载设备/库
+        # this module was already imported at top level (start of this file); not
+        # blowing up means no device/library was loaded
         self.assertFalse(linux_uinput.UInputInjector().opened)
         self.assertIsNone(linux_uinput.UInputInjector().screen_size)
 
-    def test_uinput_motion_without_screen_size_raises_chinese_error(self):
+    def test_uinput_motion_without_screen_size_raises_error(self):
         inj = linux_uinput.UInputInjector()
         with self.assertRaises(RuntimeError) as ctx:
-            # fd 是 None: 既验证了"没有尺寸"的报错, 又不会碰设备
+            # fd is None: this verifies the "no size" error without touching a device
             inj.inject_motion(1, 2)
         self.assertIn("CROSSPC_SCREEN", str(ctx.exception))
 
@@ -448,7 +459,8 @@ class TestBackendContract(unittest.TestCase):
         self.assertEqual(inj.screen_size, (2560, 1440))
 
     def test_inject_records_pressed_keys_through_base(self):
-        # 基类 inject() 会记按下状态; 用一个假实现验证委托路径正确
+        # the base class inject() records pressed state; a fake implementation
+        # verifies the delegation path is correct
         b = LinuxBackend()
         calls = []
         b._impl_kind = "uinput"
@@ -479,7 +491,8 @@ class TestBackendContract(unittest.TestCase):
         self.assertIn(("close",), calls)
 
     def test_x11_injector_not_a_backend(self):
-        # X11Injector 是独立小类, 不该是 Backend 子类(职责分离)
+        # X11Injector is a standalone small class and must not be a Backend subclass
+        # (separation of concerns)
         from crosspc.backend.linux_x11 import X11Injector
         from crosspc.backend.base import Backend
         self.assertFalse(issubclass(X11Injector, Backend))
@@ -490,7 +503,7 @@ class TestBackendContract(unittest.TestCase):
     def test_x11_unknown_button_is_skipped(self):
         from crosspc.backend.linux_x11 import X11Injector
         inj = X11Injector(log=lambda m: None)
-        # 没有 open(): 未知按键必须在碰 dpy 之前就返回, 不能抛
+        # no open(): an unknown button must return before touching dpy, and must not raise
         inj.inject_button(4, True)
 
     def test_x11_wheel_sign_selection(self):
@@ -498,7 +511,7 @@ class TestBackendContract(unittest.TestCase):
                                                X_BUTTON_WHEEL_LEFT,
                                                X_BUTTON_WHEEL_RIGHT,
                                                X_BUTTON_WHEEL_UP)
-        # 常量本身: 4 上 5 下 6 左 7 右(X11 的滚轮就是按钮)
+        # the constants themselves: 4 up, 5 down, 6 left, 7 right (in X11 the wheel is just buttons)
         self.assertEqual((X_BUTTON_WHEEL_UP, X_BUTTON_WHEEL_DOWN), (4, 5))
         self.assertEqual((X_BUTTON_WHEEL_LEFT, X_BUTTON_WHEEL_RIGHT), (6, 7))
 

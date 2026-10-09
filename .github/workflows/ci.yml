@@ -1,12 +1,15 @@
 name: CI
 
-# 为什么 CI 对这个项目特别重要:
-#   开发机是 Windows, Linux 那条路(X11/uinput 注入、xclip 剪辑板、Debian 的
-#   install_linux.sh)在本机根本跑不起来。而 crosspc selftest 用的是**假后端**,
-#   不需要真实 X11/uinput, 所以它能在一个真 Linux 内核上把"服务端 + 客户端 +
-#   协议 + 路由 + 剪辑板"这条主线完整跑通 —— 这是本机验证不了的补位。
-#   真键鼠相关的两项(capturetest/injecttest)故意不在 CI 里跑: CI 机器没有
-#   交互桌面, 跑了必然失败, 那是环境限制而不是代码问题。
+# Why CI matters especially for this project:
+#   the development machine is Windows, so the Linux path (X11/uinput injection,
+#   the xclip clipboard, Debian's install_linux.sh) cannot run locally at all.
+#   crosspc selftest uses the **fake backend** and needs no real X11/uinput, so
+#   it can run the whole main line -- "server + client + protocol + routing +
+#   clipboard" -- on a real Linux kernel. That is the coverage this machine
+#   cannot provide.
+#   The two real keyboard/mouse items (capturetest/injecttest) deliberately do
+#   not run in CI: a CI machine has no interactive desktop, so they would always
+#   fail, and that is an environment limitation rather than a code problem.
 
 on:
   push:
@@ -15,7 +18,7 @@ on:
   pull_request:
   workflow_dispatch:
 
-# 同一分支上连续推送时, 取消还没跑完的旧任务
+# Cancel older still-running jobs when commits are pushed to the same branch
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -25,22 +28,23 @@ permissions:
 
 jobs:
   test:
-    name: "测试 Python ${{ matrix.python }} @ ${{ matrix.os }}"
+    name: "Test Python ${{ matrix.python }} @ ${{ matrix.os }}"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          # 3.8 在 ubuntu-latest(24.04) 上没有预编译包, 用 22.04
+          # 3.8 has no prebuilt packages on ubuntu-latest (24.04), so use 22.04
           - { os: ubuntu-22.04, python: "3.8" }
-          # Debian 12 自带的就是 3.11, 单独钉一个
+          # Debian 12 ships 3.11, so pin that one separately
           - { os: ubuntu-latest, python: "3.11" }
           - { os: ubuntu-latest, python: "3.13" }
           - { os: windows-latest, python: "3.12" }
     env:
-      # Windows runner 默认控制台编码不是 UTF-8, 而测试名里有中文,
-      # 不设这个会把 UnicodeEncodeError 当成测试失败
+      # The Windows runner's default console encoding is not UTF-8 and the test
+      # names contain non-ASCII characters, so without this a UnicodeEncodeError
+      # would be reported as a test failure
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: "1"
     steps:
@@ -50,26 +54,26 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: 环境信息
+      - name: Environment info
         run: |
           python -VV
           python -c "import sys, platform; print(sys.executable); print(platform.platform())"
 
-      - name: 语法检查
+      - name: Syntax check
         run: python -m compileall -q crosspc tests tools
 
-      - name: 单元/集成测试(不需要键鼠, 不需要第二台机器)
+      - name: Unit/integration tests (no keyboard or mouse, no second machine)
         run: python -m unittest discover -s tests -t . -v
 
-      - name: 端到端回环自测(真协议/真网络/位置计算/剪辑板)
+      - name: End-to-end loopback self-test (real protocol/real network/position math/clipboard)
         run: python -m crosspc selftest
 
-      - name: 环境自检(只读, 不会接管键鼠)
-        # 无头 CI 上没有 X11/uinput, 这一项只当信息收集, 失败不拦
+      - name: Environment self-check (read-only, will not take over the keyboard and mouse)
+        # Headless CI has no X11/uinput, so this step is informational only; a failure does not block
         continue-on-error: true
         run: python -m crosspc doctor
 
-      - name: 图形界面测试(Ubuntu 上用 xvfb 造一个虚拟显示)
+      - name: GUI tests (use xvfb to create a virtual display on Ubuntu)
         if: runner.os == 'Linux'
         continue-on-error: true
         run: |
@@ -78,7 +82,7 @@ jobs:
           xvfb-run -a python -m unittest tests.test_gui -v
 
   package:
-    name: 打包与安装验证
+    name: Build and install verification
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -87,17 +91,17 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: pip install .(验证 pyproject 是对的)
+      - name: pip install . (verify pyproject is correct)
         run: |
           python -m pip install --upgrade pip
           pip install .
           crosspc --version
           crosspc --help > /dev/null
 
-      - name: 打发行包
+      - name: Build the release package
         run: python tools/make_release.py
 
-      - name: 确认发行包里没有私有文件或缓存
+      - name: Confirm the release package has no private files or caches
         run: |
           python - <<'PY'
           import zipfile, sys
@@ -109,11 +113,11 @@ jobs:
                       bad.append(n)
                   if n.rsplit("/", 1)[-1] in ("crosspc.json", "crosspc.cache.json"):
                       bad.append(n)
-              print("包内文件数:", len(names))
+              print("files in archive:", len(names))
           if bad:
-              print("不该出现的文件:", bad)
+              print("unexpected files:", bad)
               sys.exit(1)
-          print("OK: 没有缓存/私有配置")
+          print("OK: no caches/private config")
           PY
 
       - uses: actions/upload-artifact@v4

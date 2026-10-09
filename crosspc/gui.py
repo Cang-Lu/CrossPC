@@ -1,10 +1,14 @@
-"""图形界面: 设置几台电脑的相对位置。
+"""Graphical interface: set the relative positions of several computers.
 
-为什么需要一个界面: 这个工具的核心配置就是"Deiban 的屏幕在 Windows 的哪一边、
-上边缘对齐了没有"。纯文本坐标既难写也难验证 —— 差 100 像素就会出现"鼠标顶到
-屏幕边过不去"这种很难查的问题, 所以画布上直接拖, 松手自动吸附成无缝拼接。
+Why a GUI is needed: the core configuration of this tool is "which side of the
+Windows screen is the Debian screen on, and are their top edges aligned?". Plain
+text coordinates are both hard to write and hard to verify -- being off by 100
+pixels produces hard-to-diagnose problems such as "the mouse hits the screen
+edge and cannot cross", so you drag boxes on a canvas instead and letting go
+snaps them into a seamless join.
 
-界面只写配置文件, 不安装钩子、不接管键鼠, 所以在 server 上随时可以放心打开。
+The GUI only writes the config file; it installs no hooks and never takes over
+the keyboard and mouse, so it is always safe to open on the server.
 """
 from __future__ import annotations
 
@@ -22,7 +26,7 @@ from .layout import Rect, relative_direction
 from .net import local_ipv4_addresses
 from .util import Log
 
-# 画布配色
+# canvas colors
 COLOR_BG = "#1e2430"
 COLOR_SERVER = "#2d4a6b"
 COLOR_CLIENT = "#2f5d4a"
@@ -32,9 +36,10 @@ COLOR_TEXT = "#e8eef6"
 COLOR_GRID = "#2a3240"
 COLOR_HINT = "#8b98a8"
 
-#: 拖动时的吸附容差(虚拟像素)
+#: snap tolerance while dragging (virtual pixels)
 SNAP_TOLERANCE = 30
-#: "只对齐坐标不贴边"时, 两个矩形在另一个方向上允许的最大间距
+#: when only aligning coordinates (no edge contact), the largest gap the two
+#: rectangles may have along the other axis
 SNAP_ALIGN_GAP = 200
 
 
@@ -43,14 +48,14 @@ def _overlap(a0: int, a1: int, b0: int, b1: int) -> int:
 
 
 def _gap(a0: int, a1: int, b0: int, b1: int) -> int:
-    """两段区间之间的距离(重叠时为 0)。"""
+    """Distance between two intervals (0 when they overlap)."""
     if _overlap(a0, a1, b0, b1) > 0:
         return 0
     return min(abs(a0 - b1), abs(b0 - a1))
 
 
 class LayoutCanvas(tk.Canvas):
-    """画虚拟桌面, 拖动 client 方块设置相对位置。"""
+    """Draw the virtual desktop; drag the client boxes to set relative positions."""
 
     def __init__(self, master, app: "GuiApp", **kw):
         super().__init__(master, background=COLOR_BG, highlightthickness=0, **kw)
@@ -65,7 +70,7 @@ class LayoutCanvas(tk.Canvas):
         self.bind("<B1-Motion>", self._on_motion)
         self.bind("<ButtonRelease-1>", self._on_release)
 
-    # ------------------------------------------------------------ 坐标换算
+    # ------------------------------------------------------------ coordinate conversion
     def _compute_transform(self) -> None:
         rects = self.app.all_rects()
         if not rects:
@@ -79,7 +84,7 @@ class LayoutCanvas(tk.Canvas):
         sx = (w - 2 * margin) / max(bounds.w, 1)
         sy = (h - 2 * margin) / max(bounds.h, 1)
         self.scale = max(min(sx, sy), 0.005)
-        # 让内容居中: 计算偏移
+        # center the content: compute the offset
         content_w = bounds.w * self.scale
         content_h = bounds.h * self.scale
         self.offset = (int((w - content_w) / 2 - bounds.x * self.scale),
@@ -93,7 +98,7 @@ class LayoutCanvas(tk.Canvas):
         return (int((cx - self.offset[0]) / self.scale),
                 int((cy - self.offset[1]) / self.scale))
 
-    # ------------------------------------------------------------ 绘制
+    # ------------------------------------------------------------ drawing
     def redraw(self) -> None:
         self.delete("all")
         self._compute_transform()
@@ -126,7 +131,7 @@ class LayoutCanvas(tk.Canvas):
                 (COLOR_CLIENT_SEL if selected else COLOR_CLIENT))
         self.create_rectangle(x0, y0, x1, y1, fill=fill, outline=COLOR_EDGE,
                               width=2 if selected else 1)
-        tag = "本机 (server)" if is_server else name
+        tag = "local (server)" if is_server else name
         self.create_text((x0 + x1) / 2, (y0 + y1) / 2 - 12, text=tag,
                          fill=COLOR_TEXT, font=("Segoe UI", 11, "bold"))
         self.create_text((x0 + x1) / 2, (y0 + y1) / 2 + 10,
@@ -139,10 +144,10 @@ class LayoutCanvas(tk.Canvas):
     def _draw_hint(self) -> None:
         self.create_text(12, 10, anchor="nw", fill=COLOR_HINT,
                          font=("Segoe UI", 9), text=(
-                             "拖动方块设置相对位置; 松手会自动吸附成无缝拼接。\n"
-                             "鼠标从本机方块推到相邻方块的那条边, 就会跑到那台电脑。"))
+                             "Drag a box to set its relative position; letting go snaps it into a seamless join.\n"
+                             "Push the mouse from this machine's box across the shared edge into a neighboring box and the pointer goes to that computer."))
 
-    # ------------------------------------------------------------ 拖动
+    # ------------------------------------------------------------ dragging
     def _hit(self, cx: float, cy: float) -> Optional[str]:
         for name, rect, is_server, _ in reversed(self.app.machines_for_canvas()):
             if is_server:
@@ -196,7 +201,8 @@ class GuiApp:
         self.ips: List[str] = local_ipv4_addresses()
         self._probe()
 
-        root.title("CrossPC %s —— 设置电脑的相对位置" % __version__)
+        root.title("CrossPC %s - set the relative positions of the computers"
+                   % __version__)
         root.geometry("1080x680")
         root.minsize(860, 520)
         try:
@@ -209,7 +215,7 @@ class GuiApp:
         self.canvas.redraw()
         self._update_status()
 
-    # ------------------------------------------------------------ 探测
+    # ------------------------------------------------------------ probing
     def _probe(self) -> None:
         try:
             backend = get_backend(self.log.debug)
@@ -222,37 +228,38 @@ class GuiApp:
             self.probe_error = str(exc)
             if self.cfg.server_screen:
                 self.server_rect = Rect(0, 0, *self.cfg.server_screen)
-            self.log.warn("探测本机分辨率失败: %s" % exc)
+            self.log.warn("Detecting the local screen resolution failed: %s"
+                          % exc)
 
-    # ------------------------------------------------------------ 界面
+    # ------------------------------------------------------------ UI
     def _build(self) -> None:
         left = ttk.Frame(self.root, padding=8)
         left.pack(side="left", fill="y")
         right = ttk.Frame(self.root, padding=(0, 8, 8, 0))
         right.pack(side="right", fill="both", expand=True)
 
-        ttk.Label(left, text="机器", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        ttk.Label(left, text="Machines", font=("Segoe UI", 10, "bold")).pack(anchor="w")
         self.listbox = tk.Listbox(left, height=8, width=26, exportselection=False)
         self.listbox.pack(fill="x", pady=(2, 4))
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
         btns = ttk.Frame(left)
         btns.pack(fill="x")
-        ttk.Button(btns, text="添加 client", command=self.add_client).pack(
+        ttk.Button(btns, text="Add client", command=self.add_client).pack(
             side="left", expand=True, fill="x")
-        ttk.Button(btns, text="删除", command=self.del_client).pack(
+        ttk.Button(btns, text="Delete", command=self.del_client).pack(
             side="left", expand=True, fill="x")
 
-        self.form = ttk.LabelFrame(left, text="属性", padding=6)
+        self.form = ttk.LabelFrame(left, text="Properties", padding=6)
         self.form.pack(fill="x", pady=8)
         self.vars: Dict[str, tk.Variable] = {}
         self.entries: Dict[str, ttk.Entry] = {}
         rows = [
-            ("name", "名称"),
-            ("host", "对方 IP(仅 client)"),
-            ("w", "屏幕宽(px)"),
-            ("h", "屏幕高(px)"),
-            ("x", "左边位置 x"),
-            ("y", "上边位置 y"),
+            ("name", "Name"),
+            ("host", "Peer IP (client only)"),
+            ("w", "Screen width (px)"),
+            ("h", "Screen height (px)"),
+            ("x", "Left position x"),
+            ("y", "Top position y"),
         ]
         for i, (key, label) in enumerate(rows):
             ttk.Label(self.form, text=label).grid(row=i, column=0, sticky="w",
@@ -264,26 +271,26 @@ class GuiApp:
             self.vars[key] = var
             self.entries[key] = ent
         self.form.columnconfigure(1, weight=1)
-        ttk.Button(self.form, text="应用修改", command=self.apply_form).grid(
+        ttk.Button(self.form, text="Apply changes", command=self.apply_form).grid(
             row=len(rows), column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
-        # 全局设置
-        g = ttk.LabelFrame(left, text="全局", padding=6)
+        # global settings
+        g = ttk.LabelFrame(left, text="Global", padding=6)
         g.pack(fill="x")
-        for i, (key, label) in enumerate([("port", "端口"), ("token", "口令"),
-                                          ("name", "本机名"),
-                                          ("panic", "紧急热键"),
-                                          ("lock", "锁定热键")]):
+        for i, (key, label) in enumerate([("port", "Port"), ("token", "Token"),
+                                          ("name", "Local name"),
+                                          ("panic", "Panic hotkey"),
+                                          ("lock", "Lock hotkey")]):
             ttk.Label(g, text=label).grid(row=i, column=0, sticky="w")
             var = tk.StringVar()
             ttk.Entry(g, textvariable=var, width=16).grid(row=i, column=1,
                                                           sticky="ew")
             self.vars["g_" + key] = var
         self.vars["clip"] = tk.BooleanVar()
-        ttk.Checkbutton(g, text="同步剪辑板", variable=self.vars["clip"]).grid(
+        ttk.Checkbutton(g, text="Sync clipboard", variable=self.vars["clip"]).grid(
             row=5, column=0, columnspan=2, sticky="w")
         self.vars["clip_img"] = tk.BooleanVar()
-        ttk.Checkbutton(g, text="同步图片(截图)",
+        ttk.Checkbutton(g, text="Sync images (screenshots)",
                         variable=self.vars["clip_img"]).grid(
             row=6, column=0, columnspan=2, sticky="w")
         g.columnconfigure(1, weight=1)
@@ -295,13 +302,13 @@ class GuiApp:
         bottom.pack(fill="x", pady=(6, 0))
         self.status = ttk.Label(bottom, text="", justify="left", anchor="w")
         self.status.pack(side="left", fill="x", expand=True)
-        ttk.Button(bottom, text="重新探测本机分辨率",
+        ttk.Button(bottom, text="Re-detect local resolution",
                    command=self.reprobe).pack(side="right", padx=(6, 0))
-        ttk.Button(bottom, text="保存配置", command=self.save).pack(side="right")
+        ttk.Button(bottom, text="Save config", command=self.save).pack(side="right")
 
         self._load_globals()
 
-    # ------------------------------------------------------------ 数据映射
+    # ------------------------------------------------------------ data mapping
     def all_rects(self) -> List[Rect]:
         out = [self.server_rect]
         for c in self.cfg.enabled_clients():
@@ -319,11 +326,12 @@ class GuiApp:
         return None
 
     def machines_for_canvas(self):
-        out = [("本机", self.server_rect, True, False)]
+        out = [("local", self.server_rect, True, False)]
         for c in self.cfg.enabled_clients():
             r = self._rect_of(c)
             if r is None:
-                # 还没连接过、也没有尺寸: 给个占位方块, 用户先摆位置
+                # Never connected and no size known: use a placeholder box so
+                # the user can position it first
                 r = Rect(0, 0, 1920, 1080)
                 c.rect = r
             out.append((c.name, r, False, c.name == self.selected))
@@ -341,12 +349,15 @@ class GuiApp:
         self._update_status()
 
     def snap_client(self, name: str) -> None:
-        """松手后吸附。
+        """Snap after the mouse button is released.
 
-        x 和 y 两个轴**独立**求解: 一个轴负责"无缝贴边"(两个矩形共边),
-        另一个轴负责"对齐"(上边缘对齐/居中)。之前把两类候选混在一个评分里,
-        结果"本来就对齐"的那个轴永远拿 0 分, 贴边反而永远轮不上 —— 拖到离
-        边缘 12 像素的地方松手, 会留下一道缝, 鼠标就过不去了。
+        The x and y axes are solved **independently**: one axis takes care of
+        "touching the edge seamlessly" (the two rectangles share an edge), the
+        other takes care of "alignment" (top edges aligned / centered).
+        Previously both kinds of candidate were mixed into one score, so an axis
+        that was already aligned always scored 0 and edge contact never got a
+        turn -- releasing the box 12 pixels away from the edge would leave a gap
+        the mouse could not cross.
         """
         entry = self.cfg.client_by_name(name)
         if entry is None or entry.rect is None:
@@ -365,7 +376,7 @@ class GuiApp:
 
     @staticmethod
     def _best_axis(r: Rect, others: List[Rect], axis: str):
-        """在 axis 方向上给出最佳候选坐标与偏差量。"""
+        """Return the best candidate coordinate and its offset along axis."""
         if axis == "x":
             along = (r.x, r.right)
             perp = (r.y, r.bottom)
@@ -381,11 +392,13 @@ class GuiApp:
             o_perp = (o.y, o.bottom) if axis == "x" else (o.x, o.right)
             cands: List[int] = []
             if _overlap(*perp, *o_perp) > 0:
-                # 无缝贴边: 本边在另一个方向上要有重叠, 否则贴上去很怪
+                # seamless edge contact: this edge must overlap along the other
+                # axis, otherwise touching the edge looks wrong
                 cands.append(o_along[0] - size)
                 cands.append(o_along[1])
             if _gap(*perp, *o_perp) <= SNAP_ALIGN_GAP:
-                # 只对齐坐标(不贴边), 两个矩形在另一个方向上别离太远
+                # align coordinates only (no edge contact); the two rectangles
+                # must not be too far apart along the other axis
                 mid = (o_along[0] + o_along[1]) // 2
                 cands.append(o_along[0])
                 cands.append(o_along[1] - size)
@@ -396,10 +409,10 @@ class GuiApp:
                     best_val, best_d = cand, d
         return best_val, best_d
 
-    # ------------------------------------------------------------ 列表/表单
+    # ------------------------------------------------------------ list/form
     def refresh_list(self) -> None:
         self.listbox.delete(0, "end")
-        self.listbox.insert("end", "本机 (server) %dx%d"
+        self.listbox.insert("end", "local (server) %dx%d"
                             % (self.server_rect.w, self.server_rect.h))
         for c in self.cfg.enabled_clients():
             marker = " *" if c.name == self.selected else ""
@@ -455,7 +468,7 @@ class GuiApp:
         self.vars["clip"].set(self.cfg.clipboard_enabled)
         self.vars["clip_img"].set(self.cfg.clipboard_images)
 
-    # ------------------------------------------------------------ 动作
+    # ------------------------------------------------------------ actions
     def add_client(self) -> None:
         base = "client%d" % (len(self.cfg.clients) + 1)
         name = base
@@ -475,9 +488,10 @@ class GuiApp:
 
     def del_client(self) -> None:
         if not self.selected:
-            messagebox.showinfo("提示", "先选中要删除的 client")
+            messagebox.showinfo("Notice", "Select the client to delete first")
             return
-        if not messagebox.askyesno("确认", "删除 client「%s」?" % self.selected):
+        if not messagebox.askyesno("Confirm", "Delete client \"%s\"?"
+                                  % self.selected):
             return
         self.cfg.clients = [c for c in self.cfg.clients if c.name != self.selected]
         self.selected = None
@@ -496,13 +510,16 @@ class GuiApp:
             x = int(self.vars["x"].get() or 0)
             y = int(self.vars["y"].get() or 0)
         except ValueError:
-            messagebox.showerror("输入有误", "宽/高/坐标必须是整数")
+            messagebox.showerror("Invalid input",
+                                 "Width/height/coordinates must be integers")
             return
         old = entry.name
         new_name = (self.vars["name"].get() or old).strip()
         if new_name != old:
             if self.cfg.client_by_name(new_name):
-                messagebox.showerror("名字重复", "已经有一个叫「%s」的机器了" % new_name)
+                messagebox.showerror("Duplicate name",
+                                     "A machine named \"%s\" already exists"
+                                     % new_name)
                 return
             if self.sizes.get(old):
                 self.sizes.set(new_name, *self.sizes.get(old))
@@ -524,7 +541,7 @@ class GuiApp:
         try:
             self.cfg.port = int(self.vars["g_port"].get() or self.cfg.port)
         except ValueError:
-            messagebox.showerror("输入有误", "端口必须是整数")
+            messagebox.showerror("Invalid input", "The port must be an integer")
             return
         self.cfg.token = self.vars["g_token"].get()
         self.cfg.name = (self.vars["g_name"].get() or self.cfg.name).strip()
@@ -535,26 +552,28 @@ class GuiApp:
         try:
             make_hotkeys(self.cfg.hotkey_panic, self.cfg.hotkey_lock)
         except HotkeyError as exc:
-            messagebox.showerror("热键无效", str(exc))
+            messagebox.showerror("Invalid hotkey", str(exc))
             return
-        # 注意: 这里不删掉"没有 rect"的 client —— 那是留给"首次连接自动登记"的
+        # Note: clients without a rect are deliberately not deleted here -- they
+        # are left for "register automatically on first connect"
         path = self.cfg.save()
-        self.status.configure(text="已保存: %s" % path)
-        self._update_status("已保存到 %s" % path)
-        messagebox.showinfo("已保存", "配置已写入:\n%s" % path)
+        self.status.configure(text="Saved: %s" % path)
+        self._update_status("Saved to %s" % path)
+        messagebox.showinfo("Saved", "Config written to:\n%s" % path)
 
     def _update_status(self, extra: str = "") -> None:
         parts = []
         if self.probe_error:
-            parts.append("本机分辨率探测失败: %s" % self.probe_error)
+            parts.append("Detecting the local resolution failed: %s"
+                         % self.probe_error)
         else:
-            parts.append("本机(server) %dx%d, %d 个显示器"
+            parts.append("local (server) %dx%d, %d monitor(s)"
                          % (self.server_rect.w, self.server_rect.h,
                             max(len(self.monitors), 1)))
         if self.ips:
-            parts.append("局域网地址: %s" % ", ".join(self.ips))
-        host = self.ips[0] if self.ips else "<本机IP>"
-        parts.append("Debian 上运行: python3 -m crosspc client --host %s%s"
+            parts.append("LAN addresses: %s" % ", ".join(self.ips))
+        host = self.ips[0] if self.ips else "<local IP>"
+        parts.append("On Debian run: python3 -m crosspc client --host %s%s"
                      % (host, "" if self.cfg.port == 39987
                         else " --port %d" % self.cfg.port))
         if extra:
@@ -571,10 +590,12 @@ def run_gui(args) -> int:
     try:
         root = tk.Tk()
     except tk.TclError as exc:
-        print("打不开图形界面: %s" % exc, file=sys.stderr)
+        print("Cannot open the graphical interface: %s" % exc, file=sys.stderr)
         if sys.platform.startswith("linux"):
-            print("Debian 上需要装: sudo apt install python3-tk", file=sys.stderr)
-        print("也可以直接手写配置文件: %s" % cfg.path, file=sys.stderr)
+            print("On Debian you need: sudo apt install python3-tk",
+                  file=sys.stderr)
+        print("You can also write the config file by hand: %s" % cfg.path,
+              file=sys.stderr)
         return 1
     app = GuiApp(root, cfg, log)
     try:

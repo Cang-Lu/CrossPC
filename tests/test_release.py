@@ -1,7 +1,8 @@
-"""打包脚本的回归测试。
+"""Regression tests for the packaging script.
 
-最要紧的一条: **绝不能把用户自己的 crosspc.json / crosspc.cache.json 打进
-发行包** —— 里面有 IP、可能还有 token。这条测试就是那个红线。
+The most important one: **the user's own crosspc.json / crosspc.cache.json must
+never be packaged into the release archive** -- they contain IPs and possibly a
+token. That test is the red line.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
-import make_release as MR           # noqa: E402  (脚本不在包里, 要手动加路径)
+import make_release as MR           # noqa: E402  (the script is not in the package, so the path is added by hand)
 
 
 class TestMakeRelease(unittest.TestCase):
@@ -24,7 +25,7 @@ class TestMakeRelease(unittest.TestCase):
         for name in MR.EXCLUDE_NAMES:
             path = ROOT / name
             if not path.exists():
-                path.write_text('{"name": "不该被打包", "token": "秘密"}',
+                path.write_text('{"name": "must not be packaged", "token": "secret"}',
                                 encoding="utf-8")
                 self.created.append(path)
 
@@ -39,7 +40,7 @@ class TestMakeRelease(unittest.TestCase):
         rels = [rel for _, rel in MR.collect(with_tests=True)]
         for name in MR.EXCLUDE_NAMES:
             self.assertNotIn(name, rels,
-                             "%s 被打进包里了 —— 里面有 IP/token!" % name)
+                             "%s got packaged -- it contains IP/token!" % name)
 
     def test_no_pyc_or_cache_dirs(self):
         for _, rel in MR.collect(with_tests=True):
@@ -51,7 +52,8 @@ class TestMakeRelease(unittest.TestCase):
         for want in ("crosspc/__init__.py", "crosspc/backend/windows.py",
                      "crosspc/backend/linux.py", "crosspc/image.py",
                      "README.md", "pyproject.toml", "tools/install_linux.sh",
-                     # MIT 要求许可声明随副本分发, 所以发行包里必须有它
+                     # MIT requires the licence notice to travel with copies, so the
+                     # release archive must contain it
                      "LICENSE"):
             self.assertIn(want, rels)
 
@@ -64,8 +66,8 @@ class TestMakeRelease(unittest.TestCase):
                 self.assertTrue(any(n.endswith("crosspc/__init__.py")
                                     for n in names))
                 self.assertFalse(any("tests/" in n for n in names),
-                                 "--no-tests 时不该有 tests/")
-                # zip 必须能通过完整性检查
+                                 "there must be no tests/ with --no-tests")
+                # the zip must pass its integrity check
                 self.assertIsNone(zf.testzip())
         finally:
             shutil.rmtree(out / "_test", ignore_errors=True)

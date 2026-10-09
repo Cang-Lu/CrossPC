@@ -1,12 +1,16 @@
-"""client 端应用: 没有键鼠的那台机器。
+"""client-side application: the machine without the keyboard and mouse.
 
-职责只有三件事:
-  1. 连上 server(手写地址, 或者用 UDP 自动发现);
-  2. 收到输入事件就注入本机(X11 用 XTest, Wayland/无 X 时用 uinput);
-  3. 双向同步剪辑板。
+It has only three responsibilities:
+  1. connect to the server (address given by hand, or found via UDP
+     auto-discovery);
+  2. inject incoming input events locally (XTest under X11, uinput under
+     Wayland or when X is absent);
+  3. synchronize the clipboard in both directions.
 
-断开连接时必须 release_all(): 否则远端松开鼠标的那一刻链路刚好断了, 本机
-就会留下一个"一直按着 Ctrl"的状态, 那比连不上更难受。
+release_all() must run whenever the connection drops: otherwise, if the link
+happens to break at the very moment the remote side releases a mouse button,
+this machine is left in a "Ctrl is still held down" state, which is worse than
+simply failing to connect.
 """
 from __future__ import annotations
 
@@ -52,31 +56,36 @@ class ClientApp:
         self._injected = 0
         self._last_stats = time.monotonic()
 
-    # ------------------------------------------------------------ 启动
+    # ------------------------------------------------------------ startup
     def run(self) -> int:
-        # Linux+uinput 走的是"绝对定位设备", 必须知道本机分辨率。后端统一从
-        # 环境变量 CROSSPC_SCREEN 读取, 所以这里把配置里的 screen 落到环境变量
-        # (显式设置的 CROSSPC_SCREEN 优先, 便于临时覆盖)。
+        # Linux+uinput uses an "absolute positioning device", so it must know
+        # this machine's screen resolution. The backend uniformly reads it from
+        # the CROSSPC_SCREEN environment variable, so the screen from the config
+        # is pushed into the environment here (an explicitly set CROSSPC_SCREEN
+        # wins, which makes temporary overrides easy).
         if self.cfg.screen and not os.environ.get("CROSSPC_SCREEN"):
             os.environ["CROSSPC_SCREEN"] = "%dx%d" % self.cfg.screen
-            self.log.info("按配置指定本机屏幕为 %dx%d"
+            self.log.info("Using the screen size from the config: %dx%d"
                           % self.cfg.screen)
         self.backend.prepare()
         if not self.backend.supports_inject:
-            raise BackendError("%s 后端不支持注入输入, 不能当 client"
+            raise BackendError("%s backend does not support injecting input, "
+                               "it cannot act as a client"
                                % self.backend.name)
         self.desktop = self.backend.desktop_rect()
-        self.log.info("CrossPC client %s 启动, 本机桌面 %s, 注入方式 %s"
+        self.log.info("CrossPC client %s starting, local desktop %s, "
+                      "injection method %s"
                       % (__version__, self.desktop, self.backend.caps()))
-        self.log.info("本机名字: %s(server 配置里 clients[].name 要和它一致)"
-                      % self.cfg.name)
+        self.log.info("Local name: %s (clients[].name in the server config "
+                      "must match it)" % self.cfg.name)
         if self.desktop.w <= 0 or self.desktop.h <= 0:
-            raise BackendError("拿不到本机屏幕尺寸, 请在环境变量 CROSSPC_SCREEN "
-                               "里写明, 例如 CROSSPC_SCREEN=2560x1440")
+            raise BackendError("Could not obtain the local screen size, please "
+                               "set it in the CROSSPC_SCREEN environment "
+                               "variable, e.g. CROSSPC_SCREEN=2560x1440")
         try:
             self._connect_loop()
         except KeyboardInterrupt:
-            self.log.info("收到 Ctrl+C, 正在退出")
+            self.log.info("Received Ctrl+C, exiting")
         finally:
             self.shutdown()
         return 0
@@ -86,7 +95,7 @@ class ClientApp:
         if self._clipboard:
             self._clipboard.stop()
         if self._link:
-            self._link.close("client 退出")
+            self._link.close("client exiting")
             self._link = None
         try:
             self.backend.release_all()
@@ -96,19 +105,19 @@ class ClientApp:
             self.backend.close()
         except Exception:
             pass
-        self.log.info("client 已停止")
+        self.log.info("client stopped")
 
     def stop(self) -> None:
         self._stop.set()
 
-    # ------------------------------------------------------------ 连接
+    # ------------------------------------------------------------ connecting
     def _connect_loop(self) -> None:
         attempt = 0
         while not self._stop.is_set():
             host, port = self._target()
             if host is None:
                 if self.once:
-                    self.log.error("没有发现 server, 退出")
+                    self.log.error("No server discovered, exiting")
                     return
                 self._sleep(RECONNECT_STEPS[min(attempt, len(RECONNECT_STEPS) - 1)])
                 attempt += 1
@@ -119,7 +128,8 @@ class ClientApp:
             except BackendError:
                 raise
             except Exception as exc:
-                self.log.warn("连接 %s:%d 失败: %s" % (host, port, exc))
+                self.log.warn("Connecting to %s:%d failed: %s"
+                              % (host, port, exc))
                 if self.once:
                     return
                 self._sleep(RECONNECT_STEPS[min(attempt, len(RECONNECT_STEPS) - 1)])
@@ -132,25 +142,26 @@ class ClientApp:
     def _target(self) -> Tuple[Optional[str], int]:
         if self.host:
             return self.host, self.port
-        self.log.info("没写 server 地址, 用 UDP 自动发现(%d 端口)..."
-                      % self.cfg.discovery_port)
+        self.log.info("No server address configured, falling back to UDP "
+                      "auto-discovery (port %d)..." % self.cfg.discovery_port)
         found = discover(3.0, self.cfg.discovery_port)
         if not found:
-            self.log.warn("没发现 server。检查: 1) server 是否已启动 "
-                          "2) 防火墙是否放行 UDP %d 3) 或者直接用 --host 指定 IP"
+            self.log.warn("No server discovered. Check: 1) whether the server "
+                          "is running 2) whether the firewall allows UDP %d "
+                          "3) or pass the IP directly with --host"
                           % self.cfg.discovery_port)
             return None, self.port
         best = found[0]
         host = best.get("address") or best.get("host")
         port = int(best.get("port") or self.port)
-        self.log.info("发现 server 「%s」 在 %s:%d"
+        self.log.info("Discovered server \"%s\" at %s:%d"
                       % (best.get("name", "?"), host, port))
         self.host = host
         self.port = port
         return host, port
 
     def _session(self, host: str, port: int) -> None:
-        self.log.info("正在连接 %s:%d ..." % (host, port))
+        self.log.info("Connecting to %s:%d ..." % (host, port))
         sock = make_socket(host, port, timeout=HANDSHAKE_TIMEOUT)
         try:
             sock.sendall(hello(self.cfg.name, self.cfg.token,
@@ -159,23 +170,25 @@ class ClientApp:
                                __version__))
             reply = _read_one_frame(sock)
             if reply is None:
-                raise RuntimeError("握手超时: server 没有回应")
+                raise RuntimeError("handshake timed out: the server did not "
+                                   "respond")
             msg_type, payload = reply
             info = parse_json(payload)
             if msg_type == T_ERROR or not info.get("ok", msg_type == T_HELLO_ACK):
-                raise RuntimeError("server 拒绝: %s" % info.get("message")
-                                   or info.get("reason") or "未知原因")
+                raise RuntimeError("server refused: %s" % info.get("message")
+                                   or info.get("reason") or "unknown reason")
             if msg_type != T_HELLO_ACK:
-                raise RuntimeError("握手消息类型不对: %s" % msg_type)
+                raise RuntimeError("wrong handshake message type: %s" % msg_type)
             if int(info.get("protocol", 0)) != PROTOCOL_VERSION:
-                raise RuntimeError("协议版本不一致")
+                raise RuntimeError("protocol version mismatch")
             server_name = info.get("name")
-            self.log.info("已连接到 server 「%s」, 桌面 %s"
+            self.log.info("Connected to server \"%s\", desktop %s"
                           % (server_name, info.get("desktop")))
             if server_name and server_name == self.cfg.name:
-                self.log.warn("本机名字和 server 一样(都是「%s」), server 会自动给"
-                              "本机改名; 建议在配置里设置 \"name\" 区分开"
-                              % self.cfg.name)
+                self.log.warn("This machine has the same name as the server "
+                              "(both \"%s\"), the server will rename it "
+                              "automatically; consider setting a distinct "
+                              "\"name\" in the config" % self.cfg.name)
         except Exception:
             sock.close()
             raise
@@ -196,7 +209,8 @@ class ClientApp:
                 prefer_image=(self.cfg.clipboard_prefer == "image"))
             self._clipboard.start()
 
-        self.log.info("就绪: 把 server 上的鼠标移到本机所在的屏幕边缘即可")
+        self.log.info("Ready: move the mouse on the server to the screen edge "
+                      "where this machine sits")
         try:
             while not self._stop.is_set() and link.alive:
                 time.sleep(0.5)
@@ -206,19 +220,19 @@ class ClientApp:
             if self._clipboard:
                 self._clipboard.stop()
                 self._clipboard = None
-            link.close("会话结束")
+            link.close("session ended")
             self._link = None
 
     def _sleep(self, seconds: float) -> None:
         self._stop.wait(seconds)
 
-    # ------------------------------------------------------------ 收到输入
+    # ------------------------------------------------------------ input received
     def _on_frame(self, msg_type: int, payload: bytes) -> None:
         if msg_type == T_INPUT:
             try:
                 events = decode_input(payload)
             except Exception as exc:
-                self.log.warn("输入帧解析失败: %s" % exc)
+                self.log.warn("Failed to parse the input frame: %s" % exc)
                 return
             self._inject(events)
         elif msg_type == T_CLIPBOARD:
@@ -234,10 +248,10 @@ class ClientApp:
         elif msg_type == T_CONTROL:
             info = parse_json(payload)
             if info.get("action") == "bye":
-                self.log.info("server 说再见: %s" % info.get("reason", ""))
+                self.log.info("server said goodbye: %s" % info.get("reason", ""))
         elif msg_type == T_ERROR:
             info = parse_json(payload)
-            self.log.warn("server 报错: %s" % info.get("message"))
+            self.log.warn("server reported an error: %s" % info.get("message"))
 
     def _inject(self, events) -> None:
         inject = self.backend.inject
@@ -248,19 +262,21 @@ class ClientApp:
             try:
                 inject(ev)
             except BackendError as exc:
-                self.log.error("注入失败: %s" % exc)
+                self.log.error("Injection failed: %s" % exc)
                 return
             except Exception as exc:
-                self.log.warn("注入事件出错(%s): %s" % (ev.describe(), exc))
+                self.log.warn("Injecting an event failed (%s): %s"
+                              % (ev.describe(), exc))
                 return
             self._injected += 1
         if self.cfg.debug_events and events:
-            self.log.event("注入 %d 个事件, 累计 %d" % (len(events), self._injected))
+            self.log.event("Injected %d events, %d in total"
+                           % (len(events), self._injected))
 
     def _on_close(self, reason: str) -> None:
-        self.log.warn("与 server 的连接断开: %s" % reason)
+        self.log.warn("Connection to the server dropped: %s" % reason)
         try:
-            self.backend.release_all()      # 防粘键, 见模块文档
+            self.backend.release_all()      # stuck-key protection, see module doc
         except Exception:
             pass
 
@@ -272,7 +288,7 @@ class ClientApp:
             try:
                 link.send_frame(clipboard_image(bytes(payload)))  # type: ignore
             except ProtocolError as exc:
-                self.log.warn("图片过大, 没发出去: %s" % exc)
+                self.log.warn("Image too large, not sent: %s" % exc)
         else:
             link.send_frame(clipboard_msg(str(payload), self.cfg.name))
 

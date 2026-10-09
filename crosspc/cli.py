@@ -1,4 +1,4 @@
-"""命令行入口: crosspc server / client / gui / doctor / discover / selftest / init。"""
+"""Command-line entry point: crosspc server / client / gui / doctor / discover / selftest / init."""
 from __future__ import annotations
 
 import argparse
@@ -18,99 +18,102 @@ from .util import Log
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="crosspc",
-        description="CrossPC —— 局域网内共享一套鼠标键盘(Windows/Linux)",
+        description="CrossPC - share one keyboard and mouse over the LAN "
+                    "(Windows/Linux)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""常见用法:
-  # Windows(接键鼠的那台, server)
-  python -m crosspc init                 # 生成 crosspc.json
-  python -m crosspc gui                  # 图形界面拖出两台机器的相对位置
-  python -m crosspc server               # 启动 server
+        epilog="""Common usage:
+  # Windows (the machine with the keyboard and mouse, server)
+  python -m crosspc init                 # generate crosspc.json
+  python -m crosspc gui                  # drag the two machines into their relative positions
+  python -m crosspc server               # start the server
 
-  # Debian(没键鼠的那台, client)
+  # Debian (the machine without the keyboard and mouse, client)
   python3 -m crosspc client --host 192.168.1.10
-  python3 -m crosspc client              # 不带 --host 时自动发现
+  python3 -m crosspc client              # auto-discovery when --host is omitted
 
-  # 排查
-  python -m crosspc doctor               # 环境自检
-  python -m crosspc selftest             # 单机回环自测(不碰真实键鼠)
+  # Troubleshooting
+  python -m crosspc doctor               # environment self-check
+  python -m crosspc selftest             # loopback self-test on one machine (never touches the real keyboard/mouse)
 """)
     p.add_argument("--version", action="version", version="CrossPC %s" % __version__)
-    sub = p.add_subparsers(dest="command", metavar="命令")
+    sub = p.add_subparsers(dest="command", metavar="command")
 
     def common(sp: argparse.ArgumentParser, with_port: bool = True) -> None:
-        sp.add_argument("-c", "--config", help="配置文件路径(默认 ./crosspc.json)")
-        sp.add_argument("--token", help="共享口令, 两端必须一致")
+        sp.add_argument("-c", "--config", help="path to the config file (default ./crosspc.json)")
+        sp.add_argument("--token", help="shared secret, the two ends must match")
         if with_port:
-            sp.add_argument("--port", type=int, help="端口(默认 %d)" % DEFAULT_PORT)
-        sp.add_argument("--backend", help="强制后端: windows / x11 / uinput / fake")
+            sp.add_argument("--port", type=int, help="port (default %d)" % DEFAULT_PORT)
+        sp.add_argument("--backend", help="force a backend: windows / x11 / uinput / fake")
         sp.add_argument("--log-level", default=None,
                         choices=["debug", "info", "warn", "error"])
-        sp.add_argument("--log-file", help="把日志同时写到这个文件(UTF-8)")
+        sp.add_argument("--log-file", help="also write the log to this file (UTF-8)")
         sp.add_argument("--debug-events", action="store_true",
-                        help="打印每个输入事件(排查用, 会明显增加延迟)")
+                        help="print every input event (for troubleshooting, adds noticeable latency)")
 
-    sp = sub.add_parser("server", help="以 server 身份运行(接键鼠的那台)")
+    sp = sub.add_parser("server", help="run as the server (the machine with the keyboard and mouse)")
     common(sp)
-    sp.add_argument("--bind", help="监听地址(默认 0.0.0.0)")
-    sp.add_argument("--stats", action="store_true", help="每 10 秒打印一次统计")
+    sp.add_argument("--bind", help="listen address (default 0.0.0.0)")
+    sp.add_argument("--stats", action="store_true", help="print statistics every 10 seconds")
     sp.add_argument("--dry-run", action="store_true",
-                    help="不安装键鼠钩子, 只验证网络/握手")
+                    help="do not install the keyboard/mouse hooks, only verify the network/handshake")
 
-    sp = sub.add_parser("client", help="以 client 身份运行(没键鼠的那台)")
+    sp = sub.add_parser("client", help="run as the client (the machine without the keyboard and mouse)")
     common(sp)
-    sp.add_argument("--host", help="server 的 IP(留空则 UDP 自动发现)")
-    sp.add_argument("--once", action="store_true", help="连不上/断开后就退出, 不重连")
-    sp.add_argument("--no-clipboard", action="store_true", help="不同步剪辑板")
+    sp.add_argument("--host", help="the server's IP (empty means UDP auto-discovery)")
+    sp.add_argument("--once", action="store_true",
+                    help="exit after a connect failure or a disconnect instead of reconnecting")
+    sp.add_argument("--no-clipboard", action="store_true", help="do not synchronize the clipboard")
 
-    sp = sub.add_parser("gui", help="图形界面设置两台机器的相对位置")
+    sp = sub.add_parser("gui", help="graphical setup of the two machines' relative positions")
     common(sp, with_port=False)
 
-    sp = sub.add_parser("doctor", help="环境自检(安全, 不会接管键鼠)")
+    sp = sub.add_parser("doctor", help="environment self-check (safe, never takes over the keyboard/mouse)")
     common(sp)
 
-    sp = sub.add_parser("discover", help="在局域网里找 CrossPC server")
+    sp = sub.add_parser("discover", help="find CrossPC servers on the LAN")
     sp.add_argument("--timeout", type=float, default=3.0)
     sp.add_argument("--discovery-port", type=int, default=DEFAULT_DISCOVERY_PORT)
 
-    sp = sub.add_parser("selftest", help="单机回环自测(用假后端, 不碰真实键鼠)")
+    sp = sub.add_parser("selftest",
+                        help="loopback self-test on one machine (uses the fake backend, never touches the real keyboard/mouse)")
     sp.add_argument("--keep-alive", action="store_true",
-                    help="自测环境保持运行, 便于用另一台机器手工连")
+                    help="keep the self-test environment running so another machine can connect by hand")
     sp.add_argument("--log-level", default="info",
                     choices=["debug", "info", "warn", "error"])
-    sp.add_argument("--log-file", help="把日志同时写到这个文件(UTF-8)")
+    sp.add_argument("--log-file", help="also write the log to this file (UTF-8)")
 
     sp = sub.add_parser("capturetest",
-                        help="真机输入验收: 抓 N 秒键鼠并统计(可选真接管)")
-    sp.add_argument("--seconds", type=float, default=5.0, help="抓多久(秒)")
+                        help="real-machine input acceptance test: capture keyboard/mouse input for N seconds and report statistics (optional real takeover)")
+    sp.add_argument("--seconds", type=float, default=5.0, help="how long to capture (seconds)")
     sp.add_argument("--takeover", action="store_true",
-                    help="真的接管(这段时间本机键鼠不生效), 用来验证吞输入")
-    sp.add_argument("--backend", help="强制后端: windows / x11 / uinput")
+                    help="really take over (the local keyboard/mouse stop working during this time), used to verify input suppression")
+    sp.add_argument("--backend", help="force a backend: windows / x11 / uinput")
     sp.add_argument("--log-level", default="info",
                     choices=["debug", "info", "warn", "error"])
-    sp.add_argument("--log-file", help="把日志同时写到这个文件(UTF-8)")
+    sp.add_argument("--log-file", help="also write the log to this file (UTF-8)")
 
     sp = sub.add_parser("injecttest",
-                        help="真机注入验收: 注入无副作用的键并回读系统状态")
+                        help="real-machine injection acceptance test: inject harmless keys and read the system state back")
     sp.add_argument("--window", action="store_true",
-                    help="连「往自建窗口真打字」一起验证(会短暂抢焦点)")
-    sp.add_argument("--backend", help="强制后端: windows / x11 / uinput")
+                    help="also verify really typing into a window the test creates (briefly steals focus)")
+    sp.add_argument("--backend", help="force a backend: windows / x11 / uinput")
     sp.add_argument("--log-level", default="info",
                     choices=["debug", "info", "warn", "error"])
-    sp.add_argument("--log-file", help="把日志同时写到这个文件(UTF-8)")
+    sp.add_argument("--log-file", help="also write the log to this file (UTF-8)")
 
     sp = sub.add_parser("clipboardtest",
-                        help="真机剪辑板验收: 文本与图片写入后读回比对(会临时改剪辑板)")
-    sp.add_argument("--backend", help="强制后端: windows / x11 / uinput")
+                        help="real-machine clipboard acceptance test: write text and an image, then read them back and compare (temporarily changes the clipboard)")
+    sp.add_argument("--backend", help="force a backend: windows / x11 / uinput")
     sp.add_argument("--log-level", default="info",
                     choices=["debug", "info", "warn", "error"])
-    sp.add_argument("--log-file", help="把日志同时写到这个文件(UTF-8)")
+    sp.add_argument("--log-file", help="also write the log to this file (UTF-8)")
 
-    sp = sub.add_parser("init", help="生成一份配置文件")
-    sp.add_argument("-c", "--config", help="写到哪里(默认 ./crosspc.json)")
-    sp.add_argument("--force", action="store_true", help="已存在也覆盖")
-    sp.add_argument("--client-name", default="debian", help="预置的 client 名字")
-    sp.add_argument("--client-host", default="", help="预置的 client IP(可留空)")
-    sp.add_argument("--token", default="", help="共享口令(留空表示不校验)")
+    sp = sub.add_parser("init", help="generate a config file")
+    sp.add_argument("-c", "--config", help="where to write it (default ./crosspc.json)")
+    sp.add_argument("--force", action="store_true", help="overwrite it even if it already exists")
+    sp.add_argument("--client-name", default="debian", help="preset client name")
+    sp.add_argument("--client-host", default="", help="preset client IP (may be left empty)")
+    sp.add_argument("--token", default="", help="shared secret (empty means no verification)")
 
     return p
 
@@ -161,21 +164,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "client":
             return cmd_client(args)
     except KeyboardInterrupt:
-        print("\n已中断")
+        print("\nInterrupted")
         return 130
     except (ConfigError, BackendError, HotkeyError) as exc:
-        print("错误: %s" % exc, file=sys.stderr)
+        print("Error: %s" % exc, file=sys.stderr)
         return 1
     except Exception as exc:                       # pragma: no cover
         import traceback
-        print("未预料的错误: %s" % exc, file=sys.stderr)
+        print("Unexpected error: %s" % exc, file=sys.stderr)
         traceback.print_exc()
         return 1
     parser.print_help()
     return 2
 
 
-# ------------------------------------------------------------------ 子命令
+# ------------------------------------------------------------------ subcommands
 def load_config(args) -> Config:
     path = args.config or default_config_path()
     cfg = Config.load(path)
@@ -211,9 +214,11 @@ def cmd_server(args) -> int:
     backend = get_backend(log, prefer=args.backend)
     if not backend.can_serve:
         raise BackendError(
-            "%s 后端不能作为 server(需要捕获并抑制本机输入)。\n"
-            "  Linux 端目前只能当 client; 接键鼠的那台请用 Windows,"
-            " 或者把键鼠插到 Windows 上。" % backend.name)
+            "%s backend cannot act as the server (it must capture and suppress "
+            "local input).\n"
+            "  The Linux side can currently only be a client; use Windows for "
+            "the machine with the keyboard and mouse, or plug the keyboard and "
+            "mouse into the Windows machine." % backend.name)
     app = ServerApp(cfg, backend, log, port=args.port, bind=args.bind,
                     stats=args.stats, dry_run=args.dry_run)
     return app.run()
@@ -226,7 +231,8 @@ def cmd_client(args) -> int:
     log.info("CrossPC %s | %s" % (__version__, platform_summary()))
     backend = get_backend(log, prefer=args.backend)
     if not backend.can_be_client:
-        raise BackendError("%s 后端不支持注入输入" % backend.name)
+        raise BackendError("%s backend does not support injecting input"
+                           % backend.name)
     app = ClientApp(cfg, backend, log, host=args.host, port=args.port,
                     once=args.once, no_clipboard=args.no_clipboard)
     return app.run()
@@ -234,15 +240,16 @@ def cmd_client(args) -> int:
 
 def cmd_discover(args) -> int:
     from .net import discover
-    print("正在广播查找 CrossPC server(UDP %d, %.1f 秒)..."
+    print("Broadcasting to find CrossPC servers (UDP %d, %.1f s)..."
           % (args.discovery_port, args.timeout))
     found = discover(args.timeout, args.discovery_port)
     if not found:
-        print("没有找到。请确认: 1) server 已启动 2) 两台机器在同一网段 "
-              "3) 防火墙放行了 UDP %d" % args.discovery_port)
+        print("Nothing found. Please check: 1) the server is running 2) both "
+              "machines are on the same subnet 3) the firewall allows UDP %d"
+              % args.discovery_port)
         return 1
     for item in found:
-        print("发现 server 「%s」 地址 %s:%s (协议 %s)"
+        print("Found server \"%s\" at %s:%s (protocol %s)"
               % (item.get("name"), item.get("address"), item.get("port"),
                  item.get("protocol")))
     return 0
@@ -251,7 +258,8 @@ def cmd_discover(args) -> int:
 def cmd_init(args) -> int:
     path = args.config or os.path.join(os.getcwd(), "crosspc.json")
     if os.path.exists(path) and not args.force:
-        print("配置文件已存在: %s (要覆盖请加 --force)" % path)
+        print("The config file already exists: %s (pass --force to overwrite)"
+              % path)
         return 1
     cfg = Config.defaults(path)
     from .config import ClientEntry
@@ -264,117 +272,123 @@ def cmd_init(args) -> int:
         r = backend.desktop_rect()
         cfg.server_screen = (r.w, r.h)
     except Exception as exc:
-        print("提示: 未能探测本机分辨率(%s), 稍后可在界面里手动填写" % exc)
+        print("Note: could not detect the local screen resolution (%s), you can "
+              "fill it in later in the GUI" % exc)
     written = cfg.save(path)
-    print("已生成配置: %s" % written)
+    print("Config generated: %s" % written)
     if cfg.server_screen:
-        print("本机(server)分辨率: %dx%d" % cfg.server_screen)
+        print("This machine (server) resolution: %dx%d" % cfg.server_screen)
     print("""
-下一步:
-  1) 在这台机器上运行:  python -m crosspc gui      (拖出两台机器的相对位置)
-  2) 启动 server:        python -m crosspc server
-  3) 在 client 上运行:   python3 -m crosspc client --host <本机IP>
+Next steps:
+  1) On this machine run:  python -m crosspc gui      (drag the two machines into their relative positions)
+  2) Start the server:     python -m crosspc server
+  3) On the client run:    python3 -m crosspc client --host <this machine's IP>
 """)
     from .net import local_ipv4_addresses
     ips = local_ipv4_addresses()
     if ips:
-        print("本机可能的局域网地址: %s" % ", ".join(ips))
+        print("Possible LAN addresses of this machine: %s" % ", ".join(ips))
     return 0
 
 
 def cmd_doctor(args) -> int:
     from .net import local_ipv4_addresses
-    # doctor 的输出是"报告"而不是"日志": 屏幕上不要时间戳, 但 --log-file 也要留一份,
-    # 这样用户把 logs 目录发出来时, 最关键的环境结论一定在里面。
+    # The doctor output is a "report" rather than a "log": no timestamps on
+    # screen, but --log-file still gets a copy so that when the user sends in
+    # the logs directory, the crucial environment conclusions are always in it.
     report = Log("info", file_path=getattr(args, "log_file", None))
     say = report.plain
-    say("CrossPC %s 环境自检" % __version__)
+    say("CrossPC %s environment self-check" % __version__)
     say("=" * 62)
-    say("平台      %s" % platform_summary())
+    say("Platform   %s" % platform_summary())
     cfg = None
     try:
         cfg = load_config(args)
-        exists = "存在" if cfg.path and os.path.exists(cfg.path) else "不存在(用默认值)"
-        say("配置      %s [%s]" % (cfg.path, exists))
+        exists = ("present" if cfg.path and os.path.exists(cfg.path)
+                  else "missing (using defaults)")
+        say("Config     %s [%s]" % (cfg.path, exists))
     except ConfigError as exc:
-        say("配置      !! 读取失败: %s" % exc)
+        say("Config     !! could not be read: %s" % exc)
         cfg = Config.defaults()
     ips = local_ipv4_addresses()
-    say("本机地址  %s" % (", ".join(ips) if ips else "没检测到局域网地址"))
-    say("用户配置目录 %s" % user_config_dir())
+    say("Addresses  %s" % (", ".join(ips) if ips else "no LAN address detected"))
+    say("User config %s" % user_config_dir())
 
     backend = None
     try:
         backend = get_backend(Log("info"), prefer=args.backend)
-        say("后端      %s" % backend.caps())
+        say("Backend    %s" % backend.caps())
         say("-" * 62)
         results = backend.probe()
         if not results:
-            say("(该后端没有提供自检项)")
+            say("(this backend provides no self-check items)")
         width = max((len(r[0]) for r in results), default=0)
         for name, ok, detail in results:
-            say("[%s] %-*s %s" % ("通过" if ok else "失败", width, name, detail))
+            say("[%s] %-*s %s" % ("PASS" if ok else "FAIL", width, name, detail))
     except BackendError as exc:
-        say("后端      !! %s" % exc)
+        say("Backend    !! %s" % exc)
     except Exception as exc:
-        say("后端      !! 初始化异常: %s" % exc)
+        say("Backend    !! initialization threw: %s" % exc)
 
     say("-" * 62)
-    # 端口可用性
+    # port availability
     if backend is not None and backend.can_serve:
         port = int(getattr(args, "port", None) or (cfg.port if cfg else DEFAULT_PORT))
         s = socket.socket()
         try:
             s.bind(("0.0.0.0", port))
-            say("[通过] 端口 %-6d 空闲, server 可以监听" % port)
+            say("[PASS] port %-6d free, the server can listen on it" % port)
         except OSError as exc:
-            say("[警告] 端口 %-6d 被占用或没权限: %s" % (port, exc))
+            say("[WARN] port %-6d is in use or not permitted: %s" % (port, exc))
         finally:
             s.close()
-    # 热键
+    # hotkeys
     if cfg is not None:
         try:
             panic, lock = make_hotkeys(cfg.hotkey_panic, cfg.hotkey_lock)
-            say("[通过] 热键      紧急收回=%s 锁定=%s" % (panic or "未设",
-                                                         lock or "未设"))
+            say("[PASS] hotkey     panic=%s lock=%s"
+                % (panic or "unset", lock or "unset"))
         except HotkeyError as exc:
-            say("[失败] 热键      %s" % exc)
+            say("[FAIL] hotkey     %s" % exc)
         if cfg.clients:
             say("       client     %s" % ", ".join(
-                "%s@%s%s" % (c.name, c.host or "?", c.rect or " 自动位置")
+                "%s@%s%s" % (c.name, c.host or "?", c.rect or " auto position")
                 for c in cfg.clients))
         else:
-            say("       client     配置里还没有, 首次连接会自动登记")
-    # 自动发现
+            say("       client     none in the config yet, the first connection "
+                "registers automatically")
+    # auto-discovery
     try:
         from .net import discover
         found = discover(1.5, cfg.discovery_port if cfg else DEFAULT_DISCOVERY_PORT)
         if found:
-            say("[通过] 发现       %s" % ", ".join(
+            say("[PASS] discovery  %s" % ", ".join(
                 "%s@%s:%s" % (f.get("name"), f.get("address"), f.get("port"))
                 for f in found))
         else:
-            say("[提示] 发现       局域网内没有其它 CrossPC server(正常, "
-                "如果你就在 server 上)")
+            say("[INFO] discovery  no other CrossPC server on the LAN (normal "
+                "if you are on the server itself)")
     except Exception as exc:
-        say("[提示] 发现       跳过(%s)" % exc)
+        say("[INFO] discovery  skipped (%s)" % exc)
     say("-" * 62)
-    say("""下一步建议:
-  * 若"键鼠钩子"一项失败: 关掉杀软/输入法里的"按键保护", 或换管理员权限运行。
-  * 若端口被占用: 换端口并保证两端一致(--port)。
-  * 若 client 连不上: 在 Windows 上放行入站 TCP %d:
+    say("""Suggested next steps:
+  * If the "keyboard/mouse hook" item fails: turn off "key protection" in your
+    antivirus or IME, or run with administrator rights.
+  * If the port is in use: switch ports and keep both ends in sync (--port).
+  * If the client cannot connect: allow inbound TCP %d on Windows:
       netsh advfirewall firewall add rule name="CrossPC" dir=in action=allow ^
         protocol=TCP localport=%d
-    (需要管理员权限的命令提示符)""" % (
+    (needs an administrator command prompt)""" % (
         cfg.port if cfg else DEFAULT_PORT, cfg.port if cfg else DEFAULT_PORT))
     if getattr(args, "log_file", None):
-        say("(本报告已写入 %s)" % args.log_file)
+        say("(this report was also written to %s)" % args.log_file)
     report.close()
     return 0
 
 
 def _fix_stdout() -> None:
-    """Windows 控制台默认可能不是 UTF-8, 中文会变乱码。"""
+    """The Windows console is not necessarily UTF-8 by default, which would
+    turn non-ASCII text into mojibake."""
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""打一个可以直接拷到另一台机器的 zip 包。
+"""Build a zip you can copy straight to another machine.
 
-为什么要它: Debian 那台机器上没有 git、也不想联网装东西, 最省事的办法就是
-把整个工具打成一个 zip 拷过去解压。这个脚本用标准库实现, Windows 和 Linux
-上都能直接跑。
+Why it exists: the Debian machine has no git and no wish to install anything
+over the network, so the least painful route is to pack the whole tool into one
+zip and unzip it there. The script uses only the standard library and runs on
+both Windows and Linux.
 
-安全要点: **绝不把用户的 crosspc.json / crosspc.cache.json 打进包里** ——
-那里面有 IP 和 token。脚本会显式排除, 并在结尾断言一遍。
+Safety point: **never pack the user's crosspc.json / crosspc.cache.json into
+the archive** -- they hold the IP and the token. The script excludes them
+explicitly and asserts it once more at the end.
 """
 from __future__ import annotations
 
@@ -20,15 +22,16 @@ from typing import List, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 
-#: 必须打进包里的目录/文件
+#: directories/files that must go into the archive
 INCLUDE_DIRS = ("crosspc", "tools", "tests")
-#: LICENSE 必须进包: MIT 的条款要求"本许可声明需随软件的所有副本一起分发"
+#: LICENSE must ship in the archive: the MIT terms require "this permission
+#: notice to be included in all copies of the software"
 INCLUDE_FILES = ("README.md", "pyproject.toml", ".gitignore", "LICENSE")
 
-#: 不打包的目录名与后缀
+#: directory names and suffixes that are not packed
 EXCLUDE_DIRS = {"__pycache__", ".git", ".idea", ".vscode", "dist", "build"}
 EXCLUDE_SUFFIX = (".pyc", ".pyo", ".pyd")
-#: 用户私有文件(含 IP/token), 一定不能进包
+#: user-private files (they contain the IP/token) that must never be packed
 EXCLUDE_NAMES = {"crosspc.json", "crosspc.cache.json"}
 
 
@@ -41,7 +44,7 @@ def version() -> str:
 
 
 def collect(with_tests: bool) -> List[Tuple[Path, str]]:
-    """返回 [(绝对路径, zip 内的相对路径)]。"""
+    """Return [(absolute path, path inside the zip)]."""
     files: List[Tuple[Path, str]] = []
     dirs = list(INCLUDE_DIRS)
     if not with_tests and "tests" in dirs:
@@ -89,38 +92,38 @@ def sha256(path: Path) -> str:
 
 
 def main(argv: List[str] = None) -> int:
-    parser = argparse.ArgumentParser(description="打包 CrossPC 发行 zip")
+    parser = argparse.ArgumentParser(description="Build the CrossPC release zip")
     parser.add_argument("-o", "--out", default=str(ROOT / "dist"),
-                        help="输出目录(默认 dist/)")
+                        help="output directory (default: dist/)")
     parser.add_argument("--no-tests", action="store_true",
-                        help="不把 tests/ 打进包里")
-    parser.add_argument("--list", action="store_true", help="只列出会打包哪些文件")
+                        help="do not pack tests/ into the archive")
+    parser.add_argument("--list", action="store_true", help="only list which files would be packed")
     args = parser.parse_args(argv)
 
     files = collect(not args.no_tests)
     if args.list:
         for _, rel in files:
             print(rel)
-        print("共 %d 个文件" % len(files))
+        print("%d files in total" % len(files))
         return 0
 
     for _, rel in files:
         if Path(rel).name in EXCLUDE_NAMES:
-            print("拒绝打包用户私有文件: %s" % rel, file=sys.stderr)
+            print("refusing to pack the user-private file: %s" % rel, file=sys.stderr)
             return 1
 
     target = build(Path(args.out), with_tests=not args.no_tests)
     size = target.stat().st_size
-    print("已生成: %s" % target)
-    print("大小  : %.1f KB (%d 个文件)" % (size / 1024.0, len(files)))
-    print("SHA256: %s" % sha256(target))
+    print("created: %s" % target)
+    print("size   : %.1f KB (%d files)" % (size / 1024.0, len(files)))
+    print("SHA256 : %s" % sha256(target))
     print()
-    print("拷到 Debian 上之后:")
+    print("After copying it to Debian:")
     print("  unzip %s -d ~/CrossPC && cd ~/CrossPC" % target.name)
-    print("  sudo bash tools/install_linux.sh          # 装 Python/剪辑板工具/uinput 权限")
-    print("  python3 -m crosspc client --host <Windows的IP>")
+    print("  sudo bash tools/install_linux.sh          # installs Python/clipboard tools/uinput permissions")
+    print("  python3 -m crosspc client --host <Windows IP>")
     print()
-    print("在 Windows 上:")
+    print("On Windows:")
     print("  python -m crosspc init && python -m crosspc gui && python -m crosspc server")
     return 0
 

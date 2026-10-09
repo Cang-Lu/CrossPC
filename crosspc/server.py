@@ -1,18 +1,21 @@
-"""server 端应用: 接键鼠的那台机器。
+"""server-side application: the machine that captures the keyboard and mouse.
 
-进程结构(线程一览):
-  主线程      监听连接 + 维护状态 + 收尾
-  crosspc-hook 低层键鼠钩子(后端内部), 只管把事件丢给 _on_input
-  link-tx-*/link-rx-*  每个 client 一条 TCP 链路的收发线程
-  clipboard   剪辑板轮询
-  discovery   UDP 自动发现
-  crosspc-watchdog 后端内部的钩子存活看门狗
+Process structure (thread overview):
+  main thread      accepts connections + maintains state + shuts down
+  crosspc-hook     low-level keyboard/mouse hook (inside the backend); its only
+                   job is to hand events to _on_input
+  link-tx-*/link-rx-*  one send/receive thread pair per client TCP link
+  clipboard   clipboard polling
+  discovery   UDP auto-discovery
+  crosspc-watchdog hook liveness watchdog inside the backend
 
-安全底线(出任何问题都要保证用户的键鼠还能用):
-  1. 只有"某台 client 真实连着"时才进入接管模式;
-  2. client 链路断掉/心跳超时 -> 立刻 force_local, 收回控制权;
-  3. 钩子线程死掉 -> 后端看门狗恢复本机输入;
-  4. Ctrl+Alt+F12(可配) 无条件收回控制权。
+Safety baseline (the user's keyboard and mouse must keep working no matter what
+goes wrong):
+  1. takeover mode is entered only while "some client is actually connected";
+  2. client link drops / heartbeat times out -> force_local immediately, take
+     control back;
+  3. hook thread dies -> the backend watchdog restores local input;
+  4. Ctrl+Alt+F12 (configurable) takes control back unconditionally.
 """
 from __future__ import annotations
 
@@ -42,7 +45,7 @@ HANDSHAKE_TIMEOUT = 8.0
 
 
 class Session:
-    """一个已连接(或正在握手)的 client。"""
+    """A connected (or currently handshaking) client."""
 
     def __init__(self, machine: Machine, link: Link, desktop: Rect, name: str):
         self.machine = machine
@@ -56,7 +59,7 @@ class Session:
         return self.link.alive
 
     def __str__(self) -> str:
-        return "%s(桌面 %s)" % (self.name, self.desktop)
+        return "%s(desktop %s)" % (self.name, self.desktop)
 
 
 class ServerApp:
@@ -92,25 +95,27 @@ class ServerApp:
         self._tick_errors = 0
         self._dropped_logged = 0
 
-    # ------------------------------------------------------------ 启动
+    # ------------------------------------------------------------ startup
     def run(self) -> int:
         self._prepare()
         self._listener = make_listener(self.bind, self.port)
         self._listener.settimeout(0.5)
-        self.log.info("CrossPC server %s 已就绪, 监听 %s:%d"
+        self.log.info("CrossPC server %s is ready, listening on %s:%d"
                       % (__version__, self.bind, self.port))
-        self.log.info("虚拟桌面:\n%s" % self.layout.describe())
+        self.log.info("Virtual desktop:\n%s" % self.layout.describe())
         for ip in _local_ips():
-            self.log.info("局域网地址: %s:%d (在 client 上用这个)"
+            self.log.info("LAN address: %s:%d (use this on the client)"
                           % (ip, self.port))
         if self.layout.clients:
             names = ", ".join(m.name for m in self.layout.clients)
-            self.log.info("等待 client 连接: %s" % names)
+            self.log.info("Waiting for client connections: %s" % names)
         else:
-            self.log.info("配置里还没有 client: 任何知道端口的机器连上来自动登记")
+            self.log.info("No client in the config yet: any machine that knows "
+                          "the port will register itself on connect")
         if not self.cfg.token:
-            self.log.warn("配置里没设 token, 局域网内任何机器都能接入"
-                          "(家用环境可以接受, 公共网络请设置 token)")
+            self.log.warn("No token configured, so any machine on the LAN can "
+                          "connect (acceptable at home, set a token on public "
+                          "networks)")
 
         self._discovery = Discovery(self.cfg.name, self.port,
                                     self.cfg.discovery_port, self.log)
@@ -127,7 +132,7 @@ class ServerApp:
         try:
             self._loop()
         except KeyboardInterrupt:
-            self.log.info("收到 Ctrl+C, 正在退出")
+            self.log.info("Received Ctrl+C, exiting")
         finally:
             self.shutdown()
         return 0
@@ -141,37 +146,41 @@ class ServerApp:
         self.layout = self.cfg.build_layout(
             Rect(0, 0, self.desktop.w, self.desktop.h), self._sizes.sizes)
         if self.desktop.x or self.desktop.y:
-            self.log.info("本机虚拟桌面左上角是 %d,%d, 对内部坐标已做归一"
+            self.log.info("The local virtual desktop's top-left corner is "
+                          "%d,%d, so internal coordinates were normalized"
                           % (self.desktop.x, self.desktop.y))
         self.router = Router(self.layout, self.log.debug)
         self._panic, self._lock_key = make_hotkeys(self.cfg.hotkey_panic,
                                                    self.cfg.hotkey_lock)
         if self.dry_run:
-            self.log.warn("--dry-run: 不安装键鼠钩子, 只验证网络/握手/剪辑板")
+            self.log.warn("--dry-run: not installing the keyboard/mouse hooks, "
+                          "only verifying network/handshake/clipboard")
             return
         self.backend.start_capture(self._on_input)
-        self.log.info("键鼠捕获已启动(%s)" % self.backend.caps())
+        self.log.info("Keyboard/mouse capture started (%s)" % self.backend.caps())
 
-    # ------------------------------------------------------------ 主循环
+    # ------------------------------------------------------------ main loop
     def _loop(self) -> None:
         assert self._listener is not None
         while not self._stop.is_set():
             try:
                 sock, addr = self._listener.accept()
             except socket.timeout:
-                # 周期性任务出任何岔子都不能弄死主循环: 这个进程同时还是
-                # 用户键鼠的"看守", 它挂了用户就得重启才能恢复手感。
+                # Nothing that goes wrong in the periodic tasks may kill the
+                # main loop: this process is also the "guardian" of the user's
+                # keyboard and mouse, and if it dies the user has to reboot to
+                # get a usable pointer back.
                 try:
                     self._tick()
                 except Exception as exc:
                     self._tick_errors += 1
                     if self._tick_errors <= 3:
-                        self.log.error("周期任务出错(第 %d 次): %s"
+                        self.log.error("Periodic task failed (attempt %d): %s"
                                        % (self._tick_errors, exc))
                 continue
             except OSError as exc:
                 if not self._stop.is_set():
-                    self.log.warn("accept 失败: %s" % exc)
+                    self.log.warn("accept failed: %s" % exc)
                 continue
             t = threading.Thread(target=self._handshake, args=(sock, addr),
                                  name="handshake-%s" % addr[0], daemon=True)
@@ -179,16 +188,17 @@ class ServerApp:
 
     def _tick(self) -> None:
         now = time.monotonic()
-        # 断线兜底: 万一 on_close 没跑到, 这里再兜一次
+        # Dead-link backstop: in case on_close never ran, catch it again here
         with self._sessions_lock:
             dead = [s for s in self.sessions.values() if not s.alive]
         for s in dead:
-            self._drop_session(s, "链路已断开")
+            self._drop_session(s, "link closed")
         if self.router and self.router.remote:
             session = self._session_for(self.router.active)
             if session is None or not session.alive:
-                self.log.warn("当前控制的 client 已离线, 立即收回控制权")
-                self._force_local("client 离线")
+                self.log.warn("The client being controlled went offline, "
+                              "taking control back now")
+                self._force_local("client offline")
         if now - self._last_reload_check >= 2.0:
             self._last_reload_check = now
             self._maybe_reload_config()
@@ -197,11 +207,14 @@ class ServerApp:
             self._log_stats()
 
     def _maybe_reload_config(self) -> None:
-        """配置文件被 GUI 改过后自动重新加载布局。
+        """Reload the layout automatically after the GUI changes the config file.
 
-        没有这个功能的话, 用户每次在界面上挪一下位置都得重启 server —— 而
-        server 重启意味着 client 要重连, 体验很差。重载时先无条件把控制权
-        收回本机, 避免在新旧布局之间出现"光标算不清在哪台机器"的中间态。
+        Without this, the user would have to restart the server every time they
+        drag a machine to a new position -- and restarting the server means the
+        clients have to reconnect, which is a poor experience. On reload,
+        control is unconditionally taken back to this machine first, so that no
+        intermediate state exists where "the cursor cannot be resolved to a
+        machine" between the old and the new layout.
         """
         path = self.cfg.path
         if not path or not os.path.exists(path):
@@ -219,10 +232,11 @@ class ServerApp:
         try:
             new = Config.load(path)
         except ConfigError as exc:
-            self.log.warn("配置文件改了但读不动, 继续用旧布局: %s" % exc)
+            self.log.warn("The config file changed but could not be read, "
+                          "keeping the old layout: %s" % exc)
             return
         if self.router and self.router.remote:
-            self._force_local("配置变更")
+            self._force_local("config changed")
         self.cfg.clients = new.clients
         self.cfg.hotkey_panic = new.hotkey_panic
         self.cfg.hotkey_lock = new.hotkey_lock
@@ -245,30 +259,32 @@ class ServerApp:
             self.router = Router(self.layout, self.log.debug)
             self._panic, self._lock_key = make_hotkeys(self.cfg.hotkey_panic,
                                                        self.cfg.hotkey_lock)
-            # 已经在线的 client 用上报过的尺寸覆盖一遍配置里的猜测
+            # Overwrite the guesses in the config with the sizes that already
+            # connected clients reported
             with self._sessions_lock:
                 for session in self.sessions.values():
                     self._register_client(session.name, session.desktop,
                                           session.machine.host)
         except Exception as exc:
-            self.log.warn("重新加载配置失败(继续用旧布局): %s" % exc)
+            self.log.warn("Reloading the config failed (keeping the old "
+                          "layout): %s" % exc)
             return
-        self.log.info("配置已重新加载:\n%s" % self.layout.describe())
+        self.log.info("Config reloaded:\n%s" % self.layout.describe())
 
     def _log_stats(self) -> None:
         with self._sessions_lock:
             parts = []
             for s in self.sessions.values():
-                parts.append("%s: 发 %d 批/丢 %d" % (s.name, s.link.sent_events,
-                                                    s.link.dropped))
-        self.log.info("状态: %s | %s" % (self.router.describe() if self.router
-                                        else "未就绪",
-                                        "; ".join(parts) or "无 client"))
+                parts.append("%s: sent %d batches/dropped %d"
+                             % (s.name, s.link.sent_events, s.link.dropped))
+        self.log.info("Status: %s | %s" % (self.router.describe() if self.router
+                                           else "not ready",
+                                           "; ".join(parts) or "no clients"))
 
     def shutdown(self) -> None:
         self._stop.set()
         if self.router and self.router.remote:
-            self._force_local("server 退出")
+            self._force_local("server exiting")
         if self._clipboard:
             self._clipboard.stop()
         if self._discovery:
@@ -276,15 +292,15 @@ class ServerApp:
         with self._sessions_lock:
             for s in list(self.sessions.values()):
                 try:
-                    s.link.send_frame(control("bye", reason="server 退出"))
+                    s.link.send_frame(control("bye", reason="server exiting"))
                 except Exception:
                     pass
-                s.link.close("server 退出")
+                s.link.close("server exiting")
             self.sessions.clear()
         try:
             self.backend.stop_capture()
         except Exception as exc:
-            self.log.debug("卸载捕获失败: %s" % exc)
+            self.log.debug("Uninstalling capture failed: %s" % exc)
         try:
             self.backend.close()
         except Exception:
@@ -298,43 +314,43 @@ class ServerApp:
         if self._sizes and self.cfg.path:
             try:
                 self.cfg.save()
-                self.log.info("配置已更新: %s" % self.cfg.path)
+                self.log.info("Config updated: %s" % self.cfg.path)
             except Exception as exc:
-                self.log.warn("保存配置失败: %s" % exc)
-        self.log.info("server 已停止")
+                self.log.warn("Saving the config failed: %s" % exc)
+        self.log.info("server stopped")
 
     def stop(self) -> None:
         self._stop.set()
 
-    # ------------------------------------------------------------ 握手
+    # ------------------------------------------------------------ handshake
     def _handshake(self, sock: socket.socket, addr) -> None:
         peer = "%s:%d" % (addr[0], addr[1])
         try:
             sock.settimeout(HANDSHAKE_TIMEOUT)
             reader = _read_one_frame(sock)
             if reader is None:
-                self.log.warn("%s 握手超时/无数据" % peer)
+                self.log.warn("%s handshake timed out/no data" % peer)
                 sock.close()
                 return
             msg_type, payload = reader
             if msg_type != T_HELLO:
-                sock.sendall(error_msg("第一条消息必须是 HELLO"))
+                sock.sendall(error_msg("the first message must be HELLO"))
                 sock.close()
                 return
             info = parse_json(payload)
             if info.get("magic") != MAGIC:
-                raise ValueError("不是 CrossPC 客户端")
+                raise ValueError("not a CrossPC client")
             if int(info.get("protocol", 0)) != PROTOCOL_VERSION:
-                raise ValueError("协议版本不一致(对端 %s, 本机 %d)"
+                raise ValueError("protocol version mismatch (peer %s, local %d)"
                                  % (info.get("protocol"), PROTOCOL_VERSION))
             if self.cfg.token and str(info.get("token", "")) != self.cfg.token:
-                raise ValueError("token 不匹配")
+                raise ValueError("token mismatch")
             name = str(info.get("name") or addr[0])
             desk = info.get("desktop") or {}
             desktop = Rect(int(desk.get("x", 0)), int(desk.get("y", 0)),
                            int(desk.get("w", 0)), int(desk.get("h", 0)))
             if desktop.w <= 0 or desktop.h <= 0:
-                raise ValueError("客户端没上报屏幕尺寸")
+                raise ValueError("the client did not report its screen size")
 
             machine = self._register_client(name, desktop, addr[0])
             sock.sendall(hello_ack(self.cfg.name, self.desktop.as_dict()))
@@ -351,10 +367,12 @@ class ServerApp:
                 old = self.sessions.get(machine.name)
                 self.sessions[machine.name] = session
             if old is not None:
-                self.log.warn("%s 重新连接, 断开旧链路" % machine.name)
-                old.link.close("被新连接替换")
+                self.log.warn("%s reconnected, closing the old link"
+                              % machine.name)
+                old.link.close("replaced by a new connection")
             link.start()
-            self.log.info("client 已连接: %s 来自 %s, 桌面 %s, 位置 %s"
+            self.log.info("client connected: %s from %s, desktop %s, "
+                          "position %s"
                           % (machine.name, peer, desktop, machine.rect))
             cur = self._clipboard
             if cur is not None and cur.enabled:
@@ -366,12 +384,13 @@ class ServerApp:
                         try:
                             link.send_frame(clipboard_image(bytes(payload)))
                         except ProtocolError as exc:
-                            self.log.warn("首屏图片没发出去: %s" % exc)
+                            self.log.warn("The initial clipboard image was not "
+                                          "sent: %s" % exc)
                     else:
                         link.send_frame(clipboard_msg(str(payload),
                                                       self.cfg.name))
         except Exception as exc:
-            self.log.warn("握手失败(%s): %s" % (peer, exc))
+            self.log.warn("Handshake failed (%s): %s" % (peer, exc))
             try:
                 sock.sendall(error_msg(str(exc)))
             except OSError:
@@ -382,16 +401,20 @@ class ServerApp:
                 pass
 
     def _register_client(self, name: str, desktop: Rect, host: str) -> Machine:
-        """登记/更新一台 client, 必要时自动给它找个位置。"""
+        """Register/update a client, giving it a position automatically if needed."""
         self._sizes.set(name, desktop.w, desktop.h)      # type: ignore[union-attr]
         self.cfg.remember_size(name, desktop.w, desktop.h)
         if name == self.layout.server.name:
-            # 重名会非常危险: 布局里按名字查会查到 server 自己, 于是"切到 client"
-            # 变成"切到 server", 接管状态和光标位置都会错乱。这里直接改名。
-            # (最常见于两台机器 hostname 相同, 或者同机开两个进程做测试)
+            # A duplicate name is very dangerous: a lookup by name in the layout
+            # finds the server itself, so "switch to the client" turns into
+            # "switch to the server" and both the takeover state and the cursor
+            # position get confused. Rename it outright here.
+            # (Most common with two machines that share a hostname, or two
+            # processes on one machine when testing.)
             new_name = "%s-%s" % (name, host.replace(".", "-") or "client")
-            self.log.warn("client 名字「%s」和本机重名, 自动改用「%s」。"
-                          "建议在 client 的配置里把 name 改成别的。"
+            self.log.warn("The client name \"%s\" duplicates this machine's "
+                          "name, automatically using \"%s\" instead. Consider "
+                          "changing name in the client's config."
                           % (name, new_name))
             name = new_name
         machine = self.layout.by_name(name)
@@ -412,17 +435,20 @@ class ServerApp:
             from .config import ClientEntry
             self.cfg.clients.append(ClientEntry(name=name, host=host,
                                                 rect=machine.rect))
-            self.log.warn("新机器 %s 未在配置里, 已自动摆到最右侧 %s; "
-                          "请运行 crosspc gui 调整相对位置" % (name, machine.rect))
+            self.log.warn("The new machine %s is not in the config, it was "
+                          "placed automatically at the far right %s; run "
+                          "crosspc gui to adjust the relative position"
+                          % (name, machine.rect))
         if machine.rect.w != desktop.w or machine.rect.h != desktop.h:
-            self.log.info("%s 的分辨率是 %dx%d(配置里是 %dx%d), 已按实际更新"
+            self.log.info("%s's screen resolution is %dx%d (the config says "
+                          "%dx%d), updated to match reality"
                           % (name, desktop.w, desktop.h,
                              machine.rect.w, machine.rect.h))
             machine.rect = Rect(machine.rect.x, machine.rect.y,
                                 desktop.w, desktop.h)
         return machine
 
-    # ------------------------------------------------------------ 链路事件
+    # ------------------------------------------------------------ link events
     def _session_for(self, machine: Optional[Machine]) -> Optional[Session]:
         if machine is None:
             return None
@@ -443,10 +469,11 @@ class ServerApp:
             if self.sessions.get(session.name) is not session:
                 return
             self.sessions.pop(session.name, None)
-        self.log.warn("client %s 断开: %s" % (session.name, reason))
+        self.log.warn("client %s disconnected: %s" % (session.name, reason))
         if self.router and self.router.active is session.machine:
-            self.log.warn("断开的是当前被控制的机器, 收回控制权")
-            self._force_local("链路断开")
+            self.log.warn("The machine being controlled disconnected, taking "
+                          "control back")
+            self._force_local("link closed")
         for probe in (self._panic, self._lock_key):
             if probe:
                 probe.reset()
@@ -469,18 +496,19 @@ class ServerApp:
         elif msg_type == T_CONTROL:
             info = parse_json(payload)
             action = info.get("action")
-            self.log.info("client %s 请求: %s" % (session.name, action))
+            self.log.info("client %s requested: %s" % (session.name, action))
             if action == "release" and self.router and \
                     self.router.active is session.machine:
-                self._force_local("client 主动放手")
+                self._force_local("client released control on its own")
         elif msg_type == T_ERROR:
             info = parse_json(payload)
-            self.log.warn("client %s 报错: %s" % (session.name,
-                                                 info.get("message")))
+            self.log.warn("client %s reported an error: %s"
+                          % (session.name, info.get("message")))
 
-    # ------------------------------------------------------------ 输入路由
+    # ------------------------------------------------------------ input routing
     def _on_input(self, ev: Event) -> None:
-        """在钩子线程上被调用: 必须极快, 不能抛异常, 不能做 IO。"""
+        """Called on the hook thread: must be very fast, must not raise, and
+        must not do any IO."""
         try:
             if ev.kind == MOTION:
                 nx, ny = norm_from_desktop(self.desktop, ev.a, ev.b)
@@ -500,12 +528,12 @@ class ServerApp:
         except Exception as exc:
             self._input_errors += 1
             if self._input_errors <= 3:
-                self.log.error("路由输入出错(第 %d 次): %s"
+                self.log.error("Routing input failed (attempt %d): %s"
                                % (self._input_errors, exc))
 
     def _panic_action(self) -> None:
-        self.log.warn("!! 紧急热键: 收回控制权")
-        self._force_local("紧急热键")
+        self.log.warn("!! panic hotkey: taking control back")
+        self._force_local("panic hotkey")
 
     def _toggle_lock(self) -> None:
         if self.router is None:
@@ -513,10 +541,12 @@ class ServerApp:
         if self.router.remote:
             self.router.set_locked(not self.router.locked)
         else:
-            self.log.info("当前在本机, 锁定热键仅在控制远端时有效")
+            self.log.info("Control is local right now, the lock hotkey only "
+                          "works while controlling a remote machine")
 
     def _apply(self, actions: List[Action]) -> None:
-        """执行 Router 给出的动作(可能被钩子线程或链路线程调用)。"""
+        """Execute the actions given by the Router (may be called by the hook
+        thread or by a link thread)."""
         for act in actions:
             try:
                 if act.kind == "local":
@@ -526,15 +556,17 @@ class ServerApp:
                 elif act.kind == "enter":
                     session = self._session_for(act.machine)
                     if session is None or not session.alive:
-                        self.log.warn("想切到 %s 但它没连着, 留在本机"
+                        self.log.warn("Wanted to switch to %s but it is not "
+                                      "connected, staying local"
                                       % (act.machine.name if act.machine else "?"))
-                        self._force_local("目标离线")
+                        self._force_local("target offline")
                         return
                     park = self.backend.cursor()
                     self.backend.set_park_point(*park)
                     self.backend.set_forwarding(True)
                     session.link.send_event(Event.motion(act.x, act.y))
-                    self.log.info("鼠标进入 %s (本地 %d,%d), 停靠点 %d,%d"
+                    self.log.info("Mouse entered %s (local %d,%d), park point "
+                                  "%d,%d"
                                   % (act.machine.name, act.x, act.y, park[0], park[1]))
                 elif act.kind == "leave":
                     session = self._session_for(act.machine)
@@ -543,23 +575,27 @@ class ServerApp:
                 elif act.kind == "remote":
                     session = self._session_for(act.machine)
                     if session is None or not session.alive:
-                        self.log.warn("%s 已离线, 收回控制权" % act.machine.name)
-                        self._force_local("目标离线")
+                        self.log.warn("%s went offline, taking control back"
+                                      % act.machine.name)
+                        self._force_local("target offline")
                         return
                     session.link.send_events(act.events)
             except BackendError as exc:
-                # 后端拒绝接管: 立刻回到本机, 绝不能把用户卡死
-                self.log.error("后端错误, 收回控制权: %s" % exc)
+                # The backend refused takeover: go back to this machine at once,
+                # never leave the user stuck
+                self.log.error("Backend error, taking control back: %s" % exc)
                 try:
-                    self._force_local("后端错误")
+                    self._force_local("backend error")
                 except Exception:
                     pass
 
     def _force_local(self, reason: str) -> None:
-        """把控制权收回本机。
+        """Take control back to this machine.
 
-        Router 用的是"左上角归一到 0,0"的坐标, 而后端给的是真实桌面坐标
-        (副屏在主屏左侧时会是负数), 所以这里必须先归一化再交给 Router。
+        The Router uses coordinates normalized so that the top-left corner is
+        0,0, whereas the backend reports real desktop coordinates (negative when
+        a secondary monitor sits to the left of the primary one), so everything
+        must be normalized here before it reaches the Router.
         """
         if self.router is None:
             return
@@ -569,13 +605,13 @@ class ServerApp:
             park = None
         self._apply(self.router.force_local(reason, park))
 
-    # ------------------------------------------------------------ 剪辑板
+    # ------------------------------------------------------------ clipboard
     def _broadcast_clipboard(self, kind: str, payload: object) -> None:
         if kind == "image":
             try:
                 msg = clipboard_image(bytes(payload))   # type: ignore[arg-type]
             except ProtocolError as exc:
-                self.log.warn("图片过大, 没发出去: %s" % exc)
+                self.log.warn("Image too large, not sent: %s" % exc)
                 return
         else:
             msg = clipboard_msg(str(payload), self.cfg.name)
@@ -585,14 +621,14 @@ class ServerApp:
             s.link.send_frame(msg)
 
 
-# ------------------------------------------------------------------ 小工具
+# ------------------------------------------------------------------ helpers
 def _local_ips() -> List[str]:
     from .net import local_ipv4_addresses
     return local_ipv4_addresses()
 
 
 def _read_one_frame(sock: socket.socket):
-    """握手期间同步读一个完整帧。"""
+    """Read one complete frame synchronously during the handshake."""
     from .protocol import FrameReader, ProtocolError
     reader = FrameReader()
     while True:

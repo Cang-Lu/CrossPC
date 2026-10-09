@@ -1,25 +1,30 @@
-"""Linux X11 注入器: 用 ctypes 直接调 libX11 + libXtst 的 XTest 扩展。
+"""Linux X11 injector: call libX11 + libXtst's XTest extension directly through ctypes.
 
-为什么独立成一个小类(不继承 Backend):
-    它只是"把事件写进某个 X display"的薄封装, 不承担平台自检/剪辑板/几何
-    这些后端职责; LinuxBackend 把它当成一个可替换的注入策略来用。这样
-    doctor 也能在不开设备的前提下单独问 available()。
+Why it is a separate small class (that does not inherit Backend):
+    It is only a thin wrapper for "write events into some X display" and does not
+    carry the backend duties of platform self-check/clipboard/geometry;
+    LinuxBackend uses it as a replaceable injection strategy. That also lets
+    doctor ask available() on its own without opening a device.
 
-不放抬头的理由(和 linux_uinput 一样):
-    本模块顶层只定义常量与 ctypes 签名, libX11.so.6 / libXtst.so.6 的
-    ctypes.CDLL(...) 一律推迟到 open()/available() 里。于是本文件在
-    Windows 上 import、compileall 都不会炸。
+Why the library loading is not at the top (same as linux_uinput):
+    This module only defines constants and ctypes signatures at the top level;
+    ctypes.CDLL(...) for libX11.so.6 / libXtst.so.6 is always deferred into
+    open()/available(). So importing this file on Windows, and compileall, both
+    work fine.
 
-线程安全:
-    Xlib 本身不是线程安全的。多线程(捕获线程 + 注入线程)下必须先
-    XInitThreads(), 且必须在**任何**其它 Xlib 调用之前调用 —— open() 里
-    第一件事就是它。即使如此, 这里仍然用一把锁把"一批事件 + flush"串起来,
-    避免两个线程的事件在请求缓冲里交错。
+Thread safety:
+    Xlib itself is not thread-safe. With multiple threads (capture thread +
+    injection thread), XInitThreads() must come first, and it must be called
+    before **any** other Xlib call -- the first thing open() does is call it.
+    Even so, a lock is still used here to serialize "a batch of events + flush",
+    so that the events of two threads cannot interleave in the request buffer.
 
-flush 策略:
-    注入方法默认不立刻 XFlush(否则每个鼠标移动一个 RTT, 1000Hz 的鼠标会
-    把 X 连接打满)。内部每攒够 FLUSH_EVERY 个事件自动 flush 一次, 调用方
-    也可以在事件批次结束时调 flush()。close() 一定会 flush。
+flush strategy:
+    The injection methods do not XFlush immediately by default (otherwise every
+    mouse movement would cost an RTT and a 1000 Hz mouse would saturate the X
+    connection). Internally a flush happens automatically once FLUSH_EVERY events
+    have accumulated, and the caller can also call flush() at the end of an event
+    batch. close() always flushes.
 """
 from __future__ import annotations
 
@@ -30,16 +35,18 @@ from typing import Callable, Dict, Optional, Tuple
 
 from .. import keys
 
-#: 库名候选。绝大多数发行版是 libX11.so.6 / libXtst.so.6, 但有些最小化
-#: 镜像(以及某些 BSD 风格的 ABI)只有无版本号的 .so, 所以都试一遍。
+#: Library name candidates. On the vast majority of distributions it is
+#: libX11.so.6 / libXtst.so.6, but some minimal images (and certain BSD-style
+#: ABIs) only ship the unversioned .so, so both are tried.
 X11_LIB_CANDIDATES = ("libX11.so.6", "libX11.so")
 XTST_LIB_CANDIDATES = ("libXtst.so.6", "libXtst.so")
 
-#: 攒够这么多事件就自动 flush 一次
+#: Automatically flush once this many events have accumulated
 FLUSH_EVERY = 8
 
-# XTest 鼠标按键编号就是 X11 的按钮编号(与 events.py 一致), 只是滚轮
-# 在 X 里也是"按钮": 4=上 5=下 6=左 7=右。这里显式写出来当文档。
+# XTest mouse button numbers are X11's button numbers (consistent with events.py);
+# the only twist is that in X the wheel is a "button" too: 4=up 5=down 6=left
+# 7=right. They are spelled out here to serve as documentation.
 X_BUTTON_LEFT = 1
 X_BUTTON_MIDDLE = 2
 X_BUTTON_RIGHT = 3
@@ -52,18 +59,18 @@ X_BUTTON_FORWARD = 9
 
 
 def _load_library(candidates) -> Tuple[Optional[ctypes.CDLL], str]:
-    """按候选顺序找第一个能加载的库, 返回 (库对象或 None, 说明)。"""
+    """Find the first library that can be loaded, in candidate order; returns (library object or None, explanation)."""
     errors = []
     for name in candidates:
         try:
             return ctypes.CDLL(name), name
         except OSError as exc:
             errors.append("%s: %s" % (name, exc))
-    return None, "; ".join(errors) or "找不到库"
+    return None, "; ".join(errors) or "no library found"
 
 
 class X11Injector:
-    """把一个 X display 当作注入目标。name 供日志/诊断展示。"""
+    """Treats one X display as the injection target. name is shown in logs/diagnostics."""
 
     name = "x11"
 
@@ -77,57 +84,61 @@ class X11Injector:
         self._root = 0
         self._lock = threading.RLock()
         self._pending = 0
-        #: (scancode, extended) -> keycode, 避免每次都问 X 服务器
+        #: (scancode, extended) -> keycode, so the X server is not asked every time
         self._keycode_cache: Dict[Tuple[int, bool], int] = {}
-        #: 已经按下的 X 按钮, 用于 close() 时兜底抬起, 防粘键
+        #: X buttons currently held, used as a fallback release in close(), stuck-key protection
         self._pressed_buttons = set()
 
     def _say(self, msg: str) -> None:
         self._log("[x11] %s" % msg)
 
-    # ------------------------------------------------------------ 生命周期
+    # ------------------------------------------------------------ lifecycle
     @property
     def opened(self) -> bool:
         return bool(self._dpy)
 
     def open(self) -> None:
-        """加载库、XInitThreads、XOpenDisplay、查 XTest 扩展、缓存 root window。"""
+        """Load the libraries, XInitThreads, XOpenDisplay, query the XTest extension, cache the root window."""
         if self._dpy:
             return
         display = self._display_name or os.environ.get("DISPLAY") or ""
         if not display:
             raise RuntimeError(
-                "环境变量 DISPLAY 为空, 没法注入 X11。请在图形会话里运行"
-                "(例如在桌面终端里执行, 或确认 SSH 带 -X/已设置 DISPLAY); "
-                "如果这台机器是纯 Wayland 会话, 请改用 uinput 注入方式。")
+                "the DISPLAY environment variable is empty, cannot inject into X11. "
+                "Run inside a graphical session (for example from a terminal on the "
+                "desktop, or make sure SSH was given -X / DISPLAY is set); if this "
+                "machine is a pure Wayland session, switch to uinput injection instead.")
 
         x11, x11_name = _load_library(X11_LIB_CANDIDATES)
         if x11 is None:
             raise RuntimeError(
-                "加载 libX11 失败(%s)。请安装 X11 运行库: "
-                "Debian/Ubuntu 上 sudo apt install libx11-6 libxtst6" % x11_name)
+                "failed to load libX11 (%s). Please install the X11 runtime "
+                "libraries: on Debian/Ubuntu, sudo apt install libx11-6 libxtst6" % x11_name)
         xtst, xtst_name = _load_library(XTST_LIB_CANDIDATES)
         if xtst is None:
             raise RuntimeError(
-                "加载 libXtst 失败(%s)。XTest 扩展在单独的库里, 请安装: "
-                "Debian/Ubuntu 上 sudo apt install libxtst6" % xtst_name)
+                "failed to load libXtst (%s). The XTest extension lives in a "
+                "separate library, please install it: on Debian/Ubuntu, "
+                "sudo apt install libxtst6" % xtst_name)
 
         self._declare_signatures(x11, xtst)
-        # 必须在任何其它 Xlib 调用之前: 之后 Xlib 才会用内部锁保护自己。
+        # Must come before any other Xlib call: only after this does Xlib protect
+        # itself with internal locks.
         x11.XInitThreads()
 
         dpy = x11.XOpenDisplay(display.encode("utf-8") if display else None)
         if not dpy:
             raise RuntimeError(
-                "XOpenDisplay(%r) 失败: X 服务器连不上。请确认 DISPLAY 指向一个"
-                "活着的 X 会话, 且当前用户有权限访问它(xhost +local: 只是临时办法)。"
+                "XOpenDisplay(%r) failed: the X server cannot be reached. Make sure "
+                "DISPLAY points at a live X session and that the current user is "
+                "allowed to access it (xhost +local: is only a stopgap)."
                 % display)
         self._x11 = x11
         self._xtst = xtst
         self._dpy = ctypes.c_void_p(dpy)
         self._root = x11.XDefaultRootWindow(self._dpy)
 
-        # 有些 X 服务器/嵌套服务器没编 XTest, 提前问一次
+        # Some X servers / nested servers are built without XTest, so ask up front
         ev_base = ctypes.c_int(0)
         err_base = ctypes.c_int(0)
         major = ctypes.c_int(0)
@@ -137,18 +148,19 @@ class X11Injector:
                                         ctypes.byref(major), ctypes.byref(minor)):
             self.close()
             raise RuntimeError(
-                "X 服务器没有 XTest 扩展, 无法注入键鼠事件。"
-                "如果这是 Wayland 会话, 请改用 uinput 注入方式。")
-        self._say("已连接 X11 display=%r XTest %d.%d"
+                "the X server has no XTest extension, so keyboard/mouse events cannot "
+                "be injected. If this is a Wayland session, switch to uinput injection.")
+        self._say("connected to X11 display=%r XTest %d.%d"
                   % (display, major.value, minor.value))
 
     @staticmethod
     def _declare_signatures(x11: ctypes.CDLL, xtst: ctypes.CDLL) -> None:
-        """显式声明参数/返回类型。
+        """Declare the argument/return types explicitly.
 
-        必须做这一步: ctypes 默认把参数当 int 传, 而 Xlib 的 Dpy*/Window/KeyCode
-        在 64 位上是 8 字节指针/unsigned long。不声明就会把指针截成 32 位,
-        典型症状是段错误或"注入到火星去"。
+        This step is mandatory: ctypes passes arguments as int by default, whereas
+        Xlib's Dpy*/Window/KeyCode are 8-byte pointers/unsigned long on 64-bit.
+        Without the declarations a pointer gets truncated to 32 bits, and the
+        typical symptoms are a segfault or "injecting to Mars".
         """
         P = ctypes.c_void_p
         x11.XInitThreads.restype = ctypes.c_int
@@ -172,15 +184,17 @@ class X11Injector:
         x11.XKeysymToKeycode.restype = ctypes.c_ubyte
         x11.XKeysymToKeycode.argtypes = [P, ctypes.c_ulong]
         # XWarpPointer(dpy, src_w, dest_w, src_x, src_y, src_w, src_h, dest_x, dest_y)
-        # 注意 Window 是 XID = unsigned long(64 位 8 字节), 坐标是 int。
+        # Note that Window is an XID = unsigned long (8 bytes on 64-bit); coordinates are int.
         x11.XWarpPointer.restype = ctypes.c_int
         x11.XWarpPointer.argtypes = [P, ctypes.c_ulong, ctypes.c_ulong,
                                      ctypes.c_int, ctypes.c_int,
                                      ctypes.c_uint, ctypes.c_uint,
                                      ctypes.c_int, ctypes.c_int]
-        # 能用 XTestFakeMotionEvent 时优先用它: 它按"屏幕坐标"发相对根窗口的
-        # 移动事件, 是合成点击的标准做法; XWarpPointer 会真的移动 X 指针, 在
-        # 某些多屏/指针约束(confine_to)场景下会被顶回来。两者都是绝对定位。
+        # Prefer XTestFakeMotionEvent when it is available: it sends a motion event
+        # relative to the root window in "screen coordinates" and is the standard way
+        # to synthesize clicks; XWarpPointer really moves the X pointer and gets
+        # pushed back in some multi-screen / pointer-constraint (confine_to) setups.
+        # Both are absolute positioning.
         xtst.XTestFakeMotionEvent.restype = ctypes.c_int
         xtst.XTestFakeMotionEvent.argtypes = [P, ctypes.c_int,
                                               ctypes.c_int, ctypes.c_int,
@@ -198,37 +212,39 @@ class X11Injector:
                                              ctypes.POINTER(ctypes.c_int)]
 
     def close(self) -> None:
-        """抬起还按着的鼠标键、flush、关掉 display。幂等, 可从任意线程调用。"""
+        """Release mouse buttons still held, flush, close the display. Idempotent, callable from any thread."""
         with self._lock:
             dpy = self._dpy
             if not dpy:
                 return
-            # 兜底: 断开时如果还有按下的鼠标键, 先抬起来, 免得对面粘键
+            # Fallback: if any mouse button is still held when we disconnect, release
+            # it first, so the other side does not end up with a stuck key
             for btn in sorted(self._pressed_buttons):
                 try:
                     self._xtst.XTestFakeButtonEvent(dpy, btn, 0, 0)
                 except Exception:
                     pass
             self._pressed_buttons.clear()
-            # keycode 缓存依赖这个 display(不同 display 的映射可能不同), 必须清
+            # The keycode cache depends on this display (different displays can have
+            # different mappings), so it must be cleared
             self._keycode_cache.clear()
             try:
                 self._x11.XFlush(dpy)
                 self._x11.XCloseDisplay(dpy)
             except Exception as exc:           # pragma: no cover
-                self._say("关闭 X display 时出错(忽略): %s" % exc)
+                self._say("error while closing the X display (ignored): %s" % exc)
             self._dpy = ctypes.c_void_p(None)
             self._pending = 0
 
     # ------------------------------------------------------------ flush
     def _bump(self) -> None:
-        """记一笔"缓冲里多了一个事件", 够数就自动 flush。"""
+        """Count "one more event in the buffer"; flush automatically once enough have piled up."""
         self._pending += 1
         if self._pending >= FLUSH_EVERY:
             self.flush()
 
     def flush(self) -> None:
-        """把攒着的请求推给 X 服务器。调用方在批次结束时调一次。"""
+        """Push the accumulated requests to the X server. The caller invokes it once at the end of a batch."""
         if not self._dpy:
             return
         try:
@@ -237,26 +253,26 @@ class X11Injector:
             self._pending = 0
 
     def sync(self) -> None:
-        """flush 并等 X 服务器处理完(诊断/测试用, 比 flush 慢)。"""
+        """flush and wait until the X server has processed it (for diagnostics/tests, slower than flush)."""
         if self._dpy:
             self._x11.XSync(self._dpy, 0)
             self._pending = 0
 
     def _require(self) -> ctypes.c_void_p:
         if not self._dpy:
-            raise RuntimeError("X11 注入器尚未打开(先调用 open())")
+            raise RuntimeError("the X11 injector is not open yet (call open() first)")
         return self._dpy
 
-    # ------------------------------------------------------------ 几何
+    # ------------------------------------------------------------ geometry
     def screen_size(self) -> Tuple[int, int]:
-        """默认屏幕的像素尺寸(XDisplayWidth/Height)。"""
+        """Pixel size of the default screen (XDisplayWidth/Height)."""
         dpy = self._require()
         scr = self._x11.XDefaultScreen(dpy)
         return (int(self._x11.XDisplayWidth(dpy, scr)),
                 int(self._x11.XDisplayHeight(dpy, scr)))
 
     def pointer(self) -> Tuple[int, int]:
-        """读当前指针位置(XQueryPointer)。读不到时返回 (0, 0)。"""
+        """Read the current pointer position (XQueryPointer). Returns (0, 0) when it cannot be read."""
         dpy = self._require()
         x11 = self._x11
         if not hasattr(x11, "XQueryPointer"):    # pragma: no cover
@@ -280,23 +296,23 @@ class X11Injector:
             return (0, 0)
         return (int(rx.value), int(ry.value))
 
-    # ------------------------------------------------------------ 注入
+    # ------------------------------------------------------------ injection
     def inject_motion(self, x: int, y: int) -> None:
-        """绝对定位到屏幕像素 (x, y)。"""
+        """Absolute positioning to screen pixel (x, y)."""
         with self._lock:
             dpy = self._require()
             if self._xtst:
                 self._xtst.XTestFakeMotionEvent(dpy, -1, int(x), int(y), 0)
-            else:                              # pragma: no cover - open() 里已保证
+            else:                              # pragma: no cover - open() already guarantees this
                 self._x11.XWarpPointer(dpy, 0, self._root, 0, 0, 0, 0,
                                        int(x), int(y))
             self._bump()
 
     def inject_button(self, button: int, pressed: bool) -> None:
-        """X11 按钮编号 1/2/3 左中右, 8/9 后退/前进, 原样交给 XTest。"""
+        """X11 button numbers 1/2/3 are left/middle/right and 8/9 are back/forward; handed to XTest as they are."""
         btn = int(button)
         if btn not in (1, 2, 3, 8, 9):
-            self._say("未知鼠标按键 %r, 已跳过" % (button,))
+            self._say("unknown mouse button %r, skipped" % (button,))
             return
         with self._lock:
             dpy = self._require()
@@ -309,7 +325,7 @@ class X11Injector:
             self._bump()
 
     def inject_wheel(self, dx: int, dy: int) -> None:
-        """滚轮: 每个格数发一对 press+release。dy 上为正, dx 右为正。"""
+        """Wheel: send one press+release pair per notch. dy is positive upwards, dx positive to the right."""
         with self._lock:
             dpy = self._require()
             up = X_BUTTON_WHEEL_UP if dy > 0 else X_BUTTON_WHEEL_DOWN
@@ -324,8 +340,9 @@ class X11Injector:
                 self._bump()
 
     def keycode_for(self, scancode: int, extended: bool = False) -> Optional[int]:
-        """(扫描码, 扩展) -> X keycode。keysym 找不到或该 keysym 在当前
-        键盘映射里没有 keycode 时返回 None(调用方跳过并记日志)。"""
+        """(scancode, extended) -> X keycode. Returns None when the keysym cannot be
+        found or that keysym has no keycode in the current keyboard mapping (the
+        caller skips it and logs)."""
         ck = (int(scancode), bool(extended))
         cached = self._keycode_cache.get(ck)
         if cached is not None:
@@ -334,7 +351,7 @@ class X11Injector:
         if keysym is None:
             return None
         code = int(self._x11.XKeysymToKeycode(self._dpy, ctypes.c_ulong(keysym)))
-        if not code:                            # X 返回 0 = 该 keysym 未绑定
+        if not code:                            # X returned 0 = that keysym is unbound
             return None
         self._keycode_cache[ck] = code
         return code
@@ -345,32 +362,35 @@ class X11Injector:
             dpy = self._require()
             code = self.keycode_for(scancode, extended)
             if code is None:
-                self._say("扫描码 0x%02X(%s) 在当前 X 键盘映射里没有对应 keycode, 已跳过"
+                self._say("scancode 0x%02X (%s) has no matching keycode in the current "
+                          "X keyboard mapping, skipped"
                           % (scancode, keys.key_name(scancode, vk, extended)))
                 return
             self._xtst.XTestFakeKeyEvent(dpy, ctypes.c_uint(code),
                                          1 if pressed else 0, 0)
             self._bump()
 
-    # ------------------------------------------------------------ 自检
+    # ------------------------------------------------------------ self-check
     @staticmethod
     def available() -> Tuple[bool, str]:
-        """(能否用 X11 注入, 中文说明)。绝不抛异常, 供 doctor 用。
+        """(whether X11 injection is usable, explanation). Never raises; used by doctor.
 
-        注意: 这里会真的连一次 X 服务器并立刻断开 —— 这是唯一可靠的判断方法
-        (只看 DISPLAY 变量存在是骗人的, 常见于 SSH 里残留的 DISPLAY)。
-        它不注入任何事件, 所以对用户无副作用。
+        Note: this really connects to an X server once and disconnects immediately
+        -- that is the only reliable way to decide (merely checking that the
+        DISPLAY variable exists is misleading, which happens often with a leftover
+        DISPLAY inside SSH). It injects no events, so there is no side effect for
+        the user.
         """
         display = os.environ.get("DISPLAY") or ""
         if not display:
-            return (False, "DISPLAY 为空: 没有 X 会话可用; 纯 Wayland 会话请用 uinput 注入")
+            return (False, "DISPLAY is empty: no X session is available; for a pure Wayland session use uinput injection")
 
         x11, why_x11 = _load_library(X11_LIB_CANDIDATES)
         if x11 is None:
-            return (False, "加载 libX11 失败(%s): Debian 上 sudo apt install libx11-6" % why_x11)
+            return (False, "failed to load libX11 (%s): on Debian, sudo apt install libx11-6" % why_x11)
         xtst, why_xtst = _load_library(XTST_LIB_CANDIDATES)
         if xtst is None:
-            return (False, "加载 libXtst 失败(%s): Debian 上 sudo apt install libxtst6" % why_xtst)
+            return (False, "failed to load libXtst (%s): on Debian, sudo apt install libxtst6" % why_xtst)
 
         inj = X11Injector()
         try:
@@ -383,5 +403,5 @@ class X11Injector:
             w = h = 0
         finally:
             inj.close()
-        return (True, "DISPLAY=%s 可用, XTest 扩展就绪, 屏幕 %dx%d"
+        return (True, "DISPLAY=%s is usable, XTest extension ready, screen %dx%d"
                 % (display, w, h))

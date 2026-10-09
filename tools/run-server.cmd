@@ -1,16 +1,16 @@
 @echo off
-rem CrossPC server(Windows, 接键鼠的那台)启动器: 双击即可
-rem 需要 Python 3。先跑一次 tools\install_windows.ps1 更稳妥。
+rem CrossPC server launcher (Windows, the machine with the keyboard and mouse): double-click it
+rem Python 3 is required. Running tools\install_windows.ps1 once first is safer.
 setlocal
 cd /d "%~dp0.."
 set PYTHONIOENCODING=utf-8
 echo ================================================================
-echo  CrossPC server 正在启动...
-echo  紧急收回键鼠: Ctrl+Alt+F12
-echo  关掉这个窗口 = 停止 server(会立刻把控制权还给本机)
+echo  CrossPC server is starting...
+echo  Panic release (take back keyboard and mouse): Ctrl+Alt+F12
+echo  Closing this window = stop the server (control returns to this machine at once)
 echo ================================================================
 echo.
 python -m crosspc server %*
 echo.
-echo server 已退出。
+echo server has exited.
 pause

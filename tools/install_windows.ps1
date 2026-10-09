@@ -1,12 +1,13 @@
-# CrossPC Windows 端安装/检查脚本
+# CrossPC Windows-side install / check script
 #
-# 做的事:
-#   1. 检查 Python 是否可用(并识别 Microsoft Store 占位程序)
-#   2. 检查/添加防火墙入站规则(需要管理员)
-#   3. 生成一份配置文件(如果还没有)
-#   4. 打印下一步
+# What it does:
+#   1. checks whether Python is usable (and detects the Microsoft Store stub)
+#   2. checks / adds the firewall inbound rule (needs administrator)
+#   3. creates a config file (if there is none yet)
+#   4. prints the next steps
 #
-# 用法(PowerShell, 普通权限即可; 加防火墙规则那步需要管理员):
+# Usage (PowerShell, normal privileges are enough; the firewall step needs
+# administrator):
 #   powershell -ExecutionPolicy Bypass -File tools\install_windows.ps1
 #   powershell -ExecutionPolicy Bypass -File tools\install_windows.ps1 -Port 39987 -AddFirewallRule
 
@@ -22,10 +23,10 @@ Set-Location $root
 
 function Say($msg) { Write-Host "[CrossPC] $msg" }
 function Ok($msg) { Write-Host "[CrossPC] [OK] $msg" -ForegroundColor Green }
-function Warn2($msg) { Write-Host "[CrossPC] [注意] $msg" -ForegroundColor Yellow }
-function Bad($msg) { Write-Host "[CrossPC] [失败] $msg" -ForegroundColor Red }
+function Warn2($msg) { Write-Host "[CrossPC] [warning] $msg" -ForegroundColor Yellow }
+function Bad($msg) { Write-Host "[CrossPC] [FAILED] $msg" -ForegroundColor Red }
 
-Say "工作目录: $root"
+Say "Working directory: $root"
 Say ""
 
 # ---------------------------------------------------------------- 1. Python
@@ -34,8 +35,8 @@ foreach ($cand in @('python', 'python3', 'py')) {
     $cmd = Get-Command $cand -ErrorAction SilentlyContinue
     if (-not $cmd) { continue }
     if ($cmd.Source -like '*WindowsApps*') {
-        Warn2 "$cand 指向 Microsoft Store 的占位程序, 它不会真的运行代码"
-        Warn2 "  请安装真正的 Python: winget install -e --id Python.Python.3.12"
+        Warn2 "$cand points to the Microsoft Store stub, which does not really run code"
+        Warn2 "  Please install the real Python: winget install -e --id Python.Python.3.12"
         continue
     }
     try {
@@ -49,22 +50,22 @@ foreach ($cand in @('python', 'python3', 'py')) {
 }
 
 if (-not $python) {
-    Bad "没有找到可用的 Python 3"
-    Say "安装方式(任选其一):"
+    Bad "No usable Python 3 found"
+    Say "How to install it (pick either):"
     Say "  winget install -e --id Python.Python.3.12"
-    Say "  或去 https://www.python.org/downloads/windows/ 下载安装并勾选 Add to PATH"
+    Say "  or download it from https://www.python.org/downloads/windows/ and tick Add to PATH"
     exit 1
 }
 
-# CrossPC 只依赖标准库, 这里只是确认一下
+# CrossPC only relies on the standard library; this just confirms that
 & $python -c "import ctypes, socket, json, threading; print('stdlib ok')" | Out-Null
-Ok "标准库检查通过(CrossPC 不需要 pip 安装任何东西)"
+Ok "Standard library check passed (CrossPC needs no pip installs)"
 
-# ---------------------------------------------------------------- 2. 防火墙
+# ---------------------------------------------------------------- 2. firewall
 $ruleName = 'CrossPC'
 $existing = netsh advfirewall firewall show rule name="$ruleName" 2>$null
 if ($LASTEXITCODE -eq 0 -and $existing -match 'CrossPC') {
-    Ok "防火墙规则 '$ruleName' 已存在"
+    Ok "Firewall rule '$ruleName' already exists"
 } else {
     $isAdmin = ([Security.Principal.WindowsPrincipal] `
         [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -73,35 +74,35 @@ if ($LASTEXITCODE -eq 0 -and $existing -match 'CrossPC') {
         netsh advfirewall firewall add rule name="$ruleName" dir=in action=allow `
             protocol=TCP localport=$Port | Out-Null
         if ($LASTEXITCODE -eq 0) {
-            Ok "已添加入站规则: TCP $Port"
+            Ok "Inbound rule added: TCP $Port"
         } else {
-            Bad "添加防火墙规则失败"
+            Bad "Failed to add the firewall rule"
         }
     } else {
-        Warn2 "还没有放行入站 TCP $Port, client 可能连不上。用管理员命令提示符执行:"
+        Warn2 "Inbound TCP $Port is not allowed yet, so the client may not be able to connect. Run this from an administrator command prompt:"
         Say  "    netsh advfirewall firewall add rule name=`"CrossPC`" dir=in action=allow protocol=TCP localport=$Port"
         if (-not $IsAdmin -and $AddFirewallRule) {
-            Say  "  (当前不是管理员, -AddFirewallRule 未生效)"
+            Say  "  (not running as administrator, so -AddFirewallRule had no effect)"
         }
     }
 }
 
-# ---------------------------------------------------------------- 3. 配置文件
+# ---------------------------------------------------------------- 3. config file
 $cfg = Join-Path $root 'crosspc.json'
 if (Test-Path $cfg) {
-    Ok "配置文件已存在: $cfg"
+    Ok "Config file already exists: $cfg"
 } else {
     & $python -m crosspc init --config $cfg
-    Ok "已生成配置文件: $cfg"
+    Ok "Config file created: $cfg"
 }
 
-# ---------------------------------------------------------------- 4. 自检
+# ---------------------------------------------------------------- 4. self-check
 Say ""
-Say "环境自检(安全, 不会接管键鼠):"
+Say "Environment self-check (safe, will not take over the keyboard and mouse):"
 & $python -m crosspc doctor
 
 Say ""
-Ok "安装检查完成。下一步:"
-Say "  1) 设置相对位置:  $python -m crosspc gui"
-Say "  2) 启动 server:    $python -m crosspc server"
-Say "  3) Debian 上运行:  python3 -m crosspc client --host <本机IP>"
+Ok "Install check complete. Next steps:"
+Say "  1) Set the relative position:  $python -m crosspc gui"
+Say "  2) Start the server:           $python -m crosspc server"
+Say "  3) On Debian, run:             python3 -m crosspc client --host <this machine's IP>"

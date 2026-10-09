@@ -1,19 +1,24 @@
-"""图片编解码: PNG <-> RGBA <-> Windows DIB, 只用标准库(zlib)。
+"""Image codec: PNG <-> RGBA <-> Windows DIB, standard library only (zlib).
 
-为什么需要它:
-    Windows 剪辑板里的图片是 **CF_DIB**(BITMAPINFOHEADER + 像素, 通常自下而上、
-    BGR 排列), 而 Linux 那边的 xclip/wl-copy 只认 PNG。所以中间必须有一个
-    DIB <-> PNG 的转换层, 而项目承诺"零第三方依赖", 就自己写。
+Why it is needed:
+    Images on the Windows clipboard are **CF_DIB** (BITMAPINFOHEADER + pixels,
+    usually bottom-up and in BGR order), while xclip/wl-copy on the Linux side
+    only understand PNG. So there has to be a DIB <-> PNG conversion layer in
+    between, and since the project promises "zero third-party dependencies", we
+    write it ourselves.
 
-性能上的做法(纯 Python 也能跑得动):
-    * 通道重排用**扩展切片赋值**(`row[0::3] = r`), 这在 CPython 里是 C 级操作;
-      DIB 24bpp 截图 1920x1080 大约几十毫秒;
-    * PNG 解码最贵的"反滤波"是逐字节的, 所以加了快路径: 全是 filter 0 时直接
-      切片取数据; 只有真正用了 1~4 号滤波的行才逐字节还原(大图会慢一两秒,
-      调用方可以先用 pixel_cap 限制)。
+How performance is handled (this stays fast enough even in pure Python):
+    * channel reordering uses **extended slice assignment** (`row[0::3] = r`),
+      which is a C-level operation in CPython; a 1920x1080 24bpp DIB screenshot
+      takes a few dozen milliseconds;
+    * the most expensive part of PNG decoding, the "unfiltering", is byte by
+      byte, so a fast path was added: when every filter is 0 the data is taken by
+      slicing, and only rows that really use filter types 1..4 are restored byte
+      by byte (a large image can take a second or two; callers can cap it first
+      with pixel_cap).
 
-支持范围: 8 位色深的 PNG(灰度/RGB/调色板/带 alpha, 非隔行),
-DIB 支持 1/4/8/16/24/32 bpp 与 BI_RGB / BI_BITFIELDS。
+Supported range: 8-bit-per-channel PNG (grayscale/RGB/palette/with alpha,
+non-interlaced); DIB supports 1/4/8/16/24/32 bpp and BI_RGB / BI_BITFIELDS.
 """
 from __future__ import annotations
 
@@ -23,19 +28,20 @@ from typing import Optional, Tuple
 
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
-#: 解码一张图最多允许多少像素(防御畸形/超大图把内存吃光)
+#: maximum number of pixels allowed when decoding one image (protects against a
+#: malformed or oversized image eating all the memory)
 DEFAULT_PIXEL_CAP = 40_000_000
 
 
 class ImageError(RuntimeError):
-    """图片数据不合法或不支持(信息面向日志/用户)。"""
+    """Image data is invalid or unsupported (the message is meant for logs/users)."""
 
 
 # ===========================================================================
 # PNG
 # ===========================================================================
 def png_size(data: bytes) -> Optional[Tuple[int, int]]:
-    """从 PNG 头里读出宽高(不完整解码), 失败返回 None。"""
+    """Read width/height from the PNG header (without a full decode); None on failure."""
     if len(data) < 24 or not data.startswith(PNG_SIG):
         return None
     if data[12:16] != b"IHDR":
@@ -49,7 +55,7 @@ def png_size(data: bytes) -> Optional[Tuple[int, int]]:
 
 def _iter_chunks(data: bytes):
     if not data.startswith(PNG_SIG):
-        raise ImageError("不是 PNG 数据(签名不对)")
+        raise ImageError("not PNG data (wrong signature)")
     off = len(PNG_SIG)
     total = len(data)
     while off + 8 <= total:
@@ -58,18 +64,18 @@ def _iter_chunks(data: bytes):
         body_start = off + 8
         body_end = body_start + length
         if body_end + 4 > total:
-            raise ImageError("PNG 数据被截断(块 %r)" % ctype)
+            raise ImageError("PNG data is truncated (chunk %r)" % ctype)
         body = data[body_start:body_end]
         (crc,) = struct.unpack_from(">I", data, body_end)
         if zlib.crc32(ctype + body) & 0xFFFFFFFF != crc:
-            raise ImageError("PNG 块 %r 校验失败(数据坏了)" % ctype)
+            raise ImageError("PNG chunk %r failed its CRC check (corrupt data)" % ctype)
         yield ctype, body
         off = body_end + 4
 
 
 def decode_png(data: bytes, pixel_cap: int = DEFAULT_PIXEL_CAP
                ) -> Tuple[bytes, int, int]:
-    """PNG -> (RGBA 字节, 宽, 高)。"""
+    """PNG -> (RGBA bytes, width, height)."""
     idat = bytearray()
     ihdr = None
     palette = None
@@ -86,29 +92,29 @@ def decode_png(data: bytes, pixel_cap: int = DEFAULT_PIXEL_CAP
         elif ctype == b"IEND":
             break
     if ihdr is None:
-        raise ImageError("PNG 缺少 IHDR")
+        raise ImageError("PNG is missing IHDR")
     w, h, depth, color, comp, filt, interlace = ihdr
     if w <= 0 or h <= 0:
-        raise ImageError("PNG 尺寸非法: %dx%d" % (w, h))
+        raise ImageError("invalid PNG size: %dx%d" % (w, h))
     if w * h > pixel_cap:
-        raise ImageError("PNG 太大(%dx%d), 超过处理上限" % (w, h))
+        raise ImageError("PNG too large (%dx%d), above the processing limit" % (w, h))
     if interlace:
-        raise ImageError("暂不支持隔行(Adam7)PNG")
+        raise ImageError("interlaced (Adam7) PNG is not supported yet")
     if depth != 8:
-        raise ImageError("暂不支持 %d 位色深的 PNG(只支持 8 位)" % depth)
+        raise ImageError("%d-bit PNG is not supported yet (only 8-bit)" % depth)
     channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color)
     if channels is None:
-        raise ImageError("不认识的 PNG 颜色类型 %d" % color)
+        raise ImageError("unknown PNG color type %d" % color)
     if color == 3 and not palette:
-        raise ImageError("调色板 PNG 缺少 PLTE")
+        raise ImageError("palette PNG is missing PLTE")
     try:
         raw = zlib.decompress(bytes(idat))
     except zlib.error as exc:
-        raise ImageError("PNG 像素数据解压失败: %s" % exc) from exc
+        raise ImageError("decompressing the PNG pixel data failed: %s" % exc) from exc
     stride = w * channels
     need = (stride + 1) * h
     if len(raw) < need:
-        raise ImageError("PNG 像素数据不完整(需要 %d 字节, 只有 %d)"
+        raise ImageError("PNG pixel data is incomplete (needs %d bytes, only %d present)"
                          % (need, len(raw)))
     pixels = _unfilter(raw, w, h, channels, stride)
     return _to_rgba(pixels, w, h, color, palette, trns), w, h
@@ -116,10 +122,11 @@ def decode_png(data: bytes, pixel_cap: int = DEFAULT_PIXEL_CAP
 
 def _unfilter(raw: bytes, w: int, h: int, channels: int,
               stride: int) -> bytes:
-    """反滤波。全是 filter 0 时走快路径(切片), 否则逐行还原。"""
+    """Unfilter. When every filter is 0 take the fast path (slicing), otherwise
+    restore row by row."""
     row_len = stride + 1
     if raw[:row_len].startswith(b"\x00"):
-        # 先探测是否全 0: 只在第一行是 0 时才值得扫一遍
+        # probe for all-zero first: only worth scanning when the first row is 0
         if all(raw[y * row_len] == 0 for y in range(h)):
             return b"".join(raw[y * row_len + 1:y * row_len + row_len]
                             for y in range(h))
@@ -159,7 +166,7 @@ def _unfilter(raw: bytes, w: int, h: int, channels: int,
                     pr = c
                 line[i] = (line[i] + pr) & 0xFF
         else:
-            raise ImageError("未知 PNG 滤波类型 %d" % ftype)
+            raise ImageError("unknown PNG filter type %d" % ftype)
         out[y * stride:(y + 1) * stride] = line
         prev = line
     return bytes(out)
@@ -177,19 +184,19 @@ def _to_rgba(pixels: bytes, w: int, h: int, color: int,
         out[2::4] = pixels[2::3]
         out[3::4] = b"\xff" * n
         return bytes(out)
-    if color == 0:                             # 灰度
+    if color == 0:                             # grayscale
         out[0::4] = pixels
         out[1::4] = pixels
         out[2::4] = pixels
         out[3::4] = b"\xff" * n
         return bytes(out)
-    if color == 4:                             # 灰度 + alpha
+    if color == 4:                             # grayscale + alpha
         out[0::4] = pixels[0::2]
         out[1::4] = pixels[0::2]
         out[2::4] = pixels[0::2]
         out[3::4] = pixels[1::2]
         return bytes(out)
-    # color == 3: 调色板
+    # color == 3: palette
     assert palette is not None
     table = []
     for i in range(0, len(palette) - 2, 3):
@@ -204,9 +211,10 @@ def _to_rgba(pixels: bytes, w: int, h: int, color: int,
 
 
 def encode_png(rgba: bytes, w: int, h: int, alpha: bool = True) -> bytes:
-    """RGBA -> PNG。固定用 filter 0, 保证同样输入产生同样字节(剪辑板去重要用)。"""
+    """RGBA -> PNG. Always uses filter 0, so identical input produces identical
+    bytes (needed for clipboard deduplication)."""
     if len(rgba) < w * h * 4:
-        raise ImageError("像素数据不足: 需要 %d 字节, 只有 %d"
+        raise ImageError("not enough pixel data: needs %d bytes, only %d present"
                          % (w * h * 4, len(rgba)))
     color = 6 if alpha else 2
     stride = w * (4 if alpha else 3)
@@ -239,7 +247,8 @@ def encode_png(rgba: bytes, w: int, h: int, alpha: bool = True) -> bytes:
 
 
 def has_alpha(rgba: bytes) -> bool:
-    """是否真的用了透明(全 255 就当作不透明, 可以走 24bpp DIB)。"""
+    """Whether transparency is really used (all 255 counts as opaque, which can
+    take the 24bpp DIB path)."""
     return not all(v == 255 for v in rgba[3::4])
 
 
@@ -267,9 +276,9 @@ def _mask_shift_bits(mask: int) -> Tuple[int, int]:
 
 def dib_to_rgba(dib: bytes, pixel_cap: int = DEFAULT_PIXEL_CAP
                 ) -> Tuple[bytes, int, int]:
-    """Windows DIB(CF_DIB / CF_DIBV5 的内容) -> (RGBA, 宽, 高)。"""
+    """Windows DIB (the payload of CF_DIB / CF_DIBV5) -> (RGBA, width, height)."""
     if len(dib) < 12:
-        raise ImageError("DIB 数据太短")
+        raise ImageError("DIB data is too short")
     (hdr_size,) = struct.unpack_from("<I", dib, 0)
     masks: Optional[Tuple[int, int, int, int]] = None
     palette_off = hdr_size
@@ -292,36 +301,38 @@ def dib_to_rgba(dib: bytes, pixel_cap: int = DEFAULT_PIXEL_CAP
                          rgba_mask[3] if rgba_mask else 0)
             else:
                 if len(dib) < 52:
-                    raise ImageError("DIB 缺少颜色掩码")
+                    raise ImageError("DIB is missing its color masks")
                 r, g, b = struct.unpack_from("<III", dib, 40)
                 masks = (r, g, b, 0)
                 palette_off = 52
     else:
-        raise ImageError("不认识的 DIB 头大小 %d" % hdr_size)
+        raise ImageError("unknown DIB header size %d" % hdr_size)
 
     if w <= 0 or h == 0:
-        raise ImageError("DIB 尺寸非法: %dx%d" % (w, h))
+        raise ImageError("invalid DIB size: %dx%d" % (w, h))
     top_down = h < 0
     h = abs(h)
     if w * h > pixel_cap:
-        raise ImageError("DIB 太大(%dx%d), 超过处理上限" % (w, h))
+        raise ImageError("DIB too large (%dx%d), above the processing limit" % (w, h))
     if palette_off > len(dib):
-        raise ImageError("DIB 头长度超出数据范围")
+        raise ImageError("the DIB header length exceeds the available data")
 
     palette = None
     if bpp <= 8:
-        # 调色板项数: 优先用 biClrUsed, 没写(0)就按 2^bpp。写多了会算错像素起点,
-        # 所以上限硬卡在 2^bpp。
+        # Number of palette entries: prefer biClrUsed and fall back to 2^bpp when
+        # it is absent (0). Too many entries would compute the pixel start wrong,
+        # so the upper bound is hard-capped at 2^bpp.
         count = clr_used if 0 < clr_used <= (1 << bpp) else (1 << bpp)
         need = palette_off + count * palette_entry
         if len(dib) < need:
-            raise ImageError("DIB 调色板不完整")
+            raise ImageError("the DIB palette is incomplete")
         palette = []
         for i in range(count):
             off = palette_off + i * palette_entry
             b, g, r = dib[off], dib[off + 1], dib[off + 2]
-            # 调色板第 4 字节是"保留"字段, 不是 alpha: 老软件里它是 0,
-            # 若当 alpha 用会把整幅图变成全透明。所以一律按不透明处理。
+            # The palette's 4th byte is a "reserved" field, not alpha: legacy
+            # software leaves it 0, and using it as alpha would make the whole
+            # image fully transparent. So it is always treated as opaque.
             palette.append(bytes((r, g, b, 255)))
         data_off = need
     elif bpp == 16 and masks is None:
@@ -332,7 +343,7 @@ def dib_to_rgba(dib: bytes, pixel_cap: int = DEFAULT_PIXEL_CAP
 
     stride = ((w * bpp + 31) // 32) * 4
     if data_off + stride * h > len(dib):
-        raise ImageError("DIB 像素数据不完整(需要 %d 字节, 只有 %d)"
+        raise ImageError("DIB pixel data is incomplete (needs %d bytes, only %d present)"
                          % (data_off + stride * h, len(dib)))
     out = bytearray(w * h * 4)
     for y in range(h):
@@ -342,8 +353,9 @@ def dib_to_rgba(dib: bytes, pixel_cap: int = DEFAULT_PIXEL_CAP
         if bpp == 32:
             row = dib[off:off + w * 4]
             if masks:
-                # BI_BITFIELDS / BI_ALPHABITFIELDS: 通道位置由掩码说了算,
-                # 不能想当然按 BGRX 读。没有 alpha 掩码时按不透明处理(0xFF)。
+                # BI_BITFIELDS / BI_ALPHABITFIELDS: the masks decide where the
+                # channels are, so BGRX must not be assumed. Without an alpha
+                # mask the pixels count as opaque (0xFF).
                 rs, rb = _mask_shift_bits(masks[0])
                 gs, gb = _mask_shift_bits(masks[1])
                 bs, bb = _mask_shift_bits(masks[2])
@@ -358,16 +370,17 @@ def dib_to_rgba(dib: bytes, pixel_cap: int = DEFAULT_PIXEL_CAP
                     a = _scale((v & masks[3]) >> as_, ab) if masks[3] else 255
                     out[d + 3] = a
                     alphas.append(a)
-                # 有 alpha 掩码但整行都是 0: 这是"忘了填 alpha"的老软件行为,
-                # 按不透明处理, 否则整幅图会变成全透明什么都看不见
+                # An alpha mask exists but the whole row is 0: legacy software
+                # forgetting to fill alpha in. Treat it as opaque, otherwise the
+                # whole image turns fully transparent and nothing is visible.
                 if masks[3] and not any(alphas):
                     out[dst + 3::4] = b"\xff" * w
                 continue
-            out[dst + 0:dst + w * 4:4] = row[2::4]        # R <- 第 3 字节
+            out[dst + 0:dst + w * 4:4] = row[2::4]        # R <- 3rd byte
             out[dst + 1:dst + w * 4:4] = row[1::4]
             out[dst + 2:dst + w * 4:4] = row[0::4]
             a = row[3::4]
-            # 32bpp BI_RGB 的 alpha 常常是 0(截图为不透明), 全 0 就按不透明处理
+            # 32bpp BI_RGB alpha is often 0 (an opaque screenshot); all-zero means opaque
             out[dst + 3:dst + w * 4:4] = a if any(a) else b"\xff" * w
         elif bpp == 24:
             row = dib[off:off + w * 3]
@@ -389,11 +402,11 @@ def dib_to_rgba(dib: bytes, pixel_cap: int = DEFAULT_PIXEL_CAP
                 out[d + 3] = 255
         elif bpp in (1, 4, 8):
             assert palette is not None
-            # 用查表拼整行, 比逐像素快得多
+            # build the whole row from the lookup table, far faster than per pixel
             idx = _row_indices(dib, off, w, bpp)
             out[dst:dst + w * 4] = b"".join([palette[i] for i in idx])
         else:
-            raise ImageError("暂不支持 %d bpp 的 DIB" % bpp)
+            raise ImageError("%d bpp DIB is not supported yet" % bpp)
     return bytes(out), w, h
 
 
@@ -422,22 +435,23 @@ def _row_indices(dib: bytes, off: int, w: int, bpp: int):
 
 
 def rgba_to_dib(rgba: bytes, w: int, h: int, bpp: int = 24) -> bytes:
-    """RGBA -> CF_DIB 内容(BITMAPINFOHEADER + 自下而上像素)。
+    """RGBA -> CF_DIB payload (BITMAPINFOHEADER + bottom-up pixels).
 
-    默认 24bpp BI_RGB: 兼容性最好(画图/Office/老程序都认)。需要透明度的场景
-    我们同时还会写一个注册格式 "PNG", 由支持它的程序优先使用。
+    Defaults to 24bpp BI_RGB: the best compatibility (Paint/Office/legacy
+    programs all understand it). Where transparency is needed we also write a
+    registered "PNG" format, which programs that support it prefer.
     """
     if bpp not in (24, 32):
-        raise ImageError("DIB 写出只支持 24/32 bpp")
+        raise ImageError("writing a DIB only supports 24/32 bpp")
     if len(rgba) < w * h * 4:
-        raise ImageError("像素数据不足")
+        raise ImageError("not enough pixel data")
     stride = ((w * bpp + 31) // 32) * 4
     header = struct.pack("<IiiHHIIiiII", 40, w, h, 1, bpp, BI_RGB,
                          stride * h, 2835, 2835, 0, 0)
     body = bytearray(stride * h)
     for y in range(h):
         src = y * w * 4
-        dst = (h - 1 - y) * stride                 # DIB 自下而上
+        dst = (h - 1 - y) * stride                 # DIB is bottom-up
         row = rgba[src:src + w * 4]
         if bpp == 24:
             rgb = bytearray(w * 3)
@@ -456,13 +470,13 @@ def rgba_to_dib(rgba: bytes, w: int, h: int, bpp: int = 24) -> bytes:
 
 
 def dib_from_png(png: bytes, pixel_cap: int = DEFAULT_PIXEL_CAP) -> bytes:
-    """PNG -> CF_DIB(24bpp; 有透明时用 32bpp 以保留 alpha)。"""
+    """PNG -> CF_DIB (24bpp; 32bpp when transparency is present, to keep alpha)."""
     rgba, w, h = decode_png(png, pixel_cap=pixel_cap)
     bpp = 32 if has_alpha(rgba) else 24
     return rgba_to_dib(rgba, w, h, bpp=bpp)
 
 
 def png_from_dib(dib: bytes, pixel_cap: int = DEFAULT_PIXEL_CAP) -> bytes:
-    """CF_DIB -> PNG。"""
+    """CF_DIB -> PNG."""
     rgba, w, h = dib_to_rgba(dib, pixel_cap=pixel_cap)
     return encode_png(rgba, w, h, alpha=has_alpha(rgba))

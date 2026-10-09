@@ -1,8 +1,11 @@
-"""图片编解码测试: PNG(含四种滤波器/灰度/调色板) 与 Windows DIB 各种位深。
+"""Image codec tests: PNG (four filter types / grayscale / palette) and Windows DIB
+at every bit depth.
 
-这些是"零第三方依赖"必须自己承担的复杂度, 所以每个分支都要钉死:
-PNG 反滤波写错一个符号, 粘贴出来的图就是花的; DIB 的自下而上/BGR 顺序写反,
-拿到的是倒着的图 —— 都不会报错, 只会静默出错, 必须靠测试。
+This is the complexity that "zero third-party dependencies" forces us to carry, so
+every branch has to be pinned down: get one sign wrong in PNG unfiltering and the
+pasted image comes out garbled; reverse the DIB bottom-up/BGR order and the image
+arrives upside down. Neither raises an error -- they just fail silently -- so only
+tests can catch them.
 """
 from __future__ import annotations
 
@@ -14,7 +17,7 @@ from crosspc import image as IM
 
 
 # ===========================================================================
-# 手工构造 PNG 的辅助(测试专用), 用来喂给 decoder 各种合法/非法输入
+# Helpers that hand-build PNGs (test-only) to feed the decoder valid and invalid input
 # ===========================================================================
 def _chunk(ctype: bytes, body: bytes, crc_ok: bool = True) -> bytes:
     crc = zlib.crc32(ctype + body) & 0xFFFFFFFF
@@ -26,7 +29,7 @@ def _chunk(ctype: bytes, body: bytes, crc_ok: bool = True) -> bytes:
 def build_png(w: int, h: int, color: int, rows, palette=None,
               depth: int = 8, interlace: int = 0, crc_ok: bool = True,
               truncate: bool = False) -> bytes:
-    """rows: [(filter_type, 该行原始字节)]"""
+    """rows: [(filter_type, raw bytes of that row)]"""
     out = bytearray(IM.PNG_SIG)
     out += _chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, depth, color, 0, 0,
                                        interlace), crc_ok)
@@ -43,7 +46,8 @@ def build_png(w: int, h: int, color: int, rows, palette=None,
 
 
 def rows_of(pixels: bytes, w: int, h: int, channels: int, ftype: int = 0):
-    """把整幅像素切成 [(filter, 行字节)], 每行一条 —— build_png 需要每行一项。"""
+    """Split a whole pixel buffer into [(filter, row bytes)], one entry per row --
+    build_png needs one entry per row."""
     stride = w * channels
     return [(ftype, bytes(pixels[y * stride:(y + 1) * stride]))
             for y in range(h)]
@@ -59,7 +63,7 @@ def rgba_bytes(w: int, h: int, seed: int = 0) -> bytes:
 
 
 def filter_rows(pixels: bytes, w: int, h: int, channels: int, ftype: int):
-    """把原始像素按指定滤波器编码成 [(ftype, 行字节)]。"""
+    """Encode raw pixels with the given filter type into [(ftype, row bytes)]."""
     stride = w * channels
     rows = []
     prev = bytearray(stride)
@@ -97,7 +101,7 @@ class TestPng(unittest.TestCase):
             self.assertEqual(IM.png_size(png), (w, h))
             back, bw, bh = IM.decode_png(png)
             self.assertEqual((bw, bh), (w, h))
-            self.assertEqual(back, src, "%dx%d 往返不一致" % (w, h))
+            self.assertEqual(back, src, "%dx%d roundtrip mismatch" % (w, h))
 
     def test_encode_without_alpha_drops_alpha(self):
         src = rgba_bytes(4, 3)
@@ -107,12 +111,12 @@ class TestPng(unittest.TestCase):
         self.assertEqual(back[0::4], src[0::4])
 
     def test_encode_is_deterministic(self):
-        """同样输入必须产生同样字节: 剪辑板去重靠内容哈希。"""
+        """Identical input must produce identical bytes: clipboard dedup relies on content hashing."""
         src = rgba_bytes(20, 20)
         self.assertEqual(IM.encode_png(src, 20, 20), IM.encode_png(src, 20, 20))
 
     def test_all_filter_types_decode_correctly(self):
-        """Sub/Up/Average/Paeth 四种滤波器逐一验证。"""
+        """Verify each of the four filters Sub/Up/Average/Paeth one by one."""
         w, h, ch = 9, 7, 3
         pixels = bytes((x * 3 + y * 5 + i) % 256
                        for y in range(h) for x in range(w) for i in range(ch))
@@ -121,11 +125,11 @@ class TestPng(unittest.TestCase):
             png = build_png(w, h, 2, rows)
             rgba, bw, bh = IM.decode_png(png)
             self.assertEqual((bw, bh), (w, h), "filter %d" % ftype)
-            # 与手工展开的 RGB 对比
+            # compare against the manually expanded RGB
             expect = bytearray()
             for i in range(w * h):
                 expect += pixels[i * 3:i * 3 + 3] + b"\xff"
-            self.assertEqual(rgba, bytes(expect), "filter %d 还原错误" % ftype)
+            self.assertEqual(rgba, bytes(expect), "filter %d reconstruction wrong" % ftype)
 
     def test_gray_and_gray_alpha(self):
         w, h = 5, 3
@@ -199,19 +203,21 @@ class TestPng(unittest.TestCase):
 # ===========================================================================
 class TestDib(unittest.TestCase):
     def test_24bpp_roundtrip_and_row_order(self):
-        """DIB 是自下而上 + BGR: 上下颠倒或 RGB 写反都必须是测试能拦住的事。"""
+        """DIB is bottom-up + BGR: flipping it vertically or writing RGB instead must
+        both be things the tests catch."""
         w, h = 3, 2
         rgba = bytes((
-            255, 0, 0, 255,       # (0,0) 红
-            0, 255, 0, 255,       # (1,0) 绿
-            0, 0, 255, 255,      # (2,0) 蓝
+            255, 0, 0, 255,       # (0,0) red
+            0, 255, 0, 255,       # (1,0) green
+            0, 0, 255, 255,      # (2,0) blue
             10, 20, 30, 255,      # (0,1)
             40, 50, 60, 255,      # (1,1)
             70, 80, 90, 255,      # (2,1)
         ))
         dib = IM.rgba_to_dib(rgba, w, h, bpp=24)
         self.assertEqual(struct.unpack_from("<I", dib, 0)[0], 40)
-        # 第一行像素(文件里)应该是原图的**最后一行**, 且是 BGR
+        # the first pixel row in the file should be the **last row** of the source
+        # image, and it should be BGR
         row0 = dib[40:40 + w * 3]
         self.assertEqual(row0[0:3], bytes((30, 20, 10)))
         self.assertEqual(row0[3:6], bytes((60, 50, 40)))
@@ -227,7 +233,8 @@ class TestDib(unittest.TestCase):
         self.assertEqual(back, rgba)
 
     def test_32bpp_all_zero_alpha_treated_as_opaque(self):
-        """Windows 截图常见: 32bpp 但 alpha 全是 0, 必须当不透明, 否则整图透明。"""
+        """Common in Windows screenshots: 32bpp but with all-zero alpha, which must be
+        treated as opaque, otherwise the whole image becomes transparent."""
         w, h = 2, 1
         rgba = bytes((10, 20, 30, 0, 40, 50, 60, 0))
         dib = IM.rgba_to_dib(rgba, w, h, bpp=32)
@@ -239,8 +246,8 @@ class TestDib(unittest.TestCase):
         w, h = 2, 2
         rgba = bytes((1, 1, 1, 255, 2, 2, 2, 255, 3, 3, 3, 255, 4, 4, 4, 255))
         dib = bytearray(IM.rgba_to_dib(rgba, w, h, bpp=24))
-        struct.pack_into("<i", dib, 8, -h)          # biHeight 取负 = 自上而下
-        # 自下而上的数据现在应被当成自上而下读 => 行序颠倒
+        struct.pack_into("<i", dib, 8, -h)          # negative biHeight = top-down
+        # bottom-up data must now be read as top-down => the row order flips
         back, _, _ = IM.dib_to_rgba(bytes(dib))
         self.assertEqual(back[0:4], bytes((3, 3, 3, 255)))
         self.assertEqual(back[8:12], bytes((1, 1, 1, 255)))
@@ -250,21 +257,22 @@ class TestDib(unittest.TestCase):
         header = struct.pack("<IiiHHIIiiII", 40, w, h, 1, 8, 0,
                              ((w + 3) // 4) * 4 * h, 0, 0, 0, 0)
         palette = bytearray(256 * 4)
-        palette[0:4] = bytes((0, 0, 255, 0))        # 索引0 -> 红(BGR 存)
-        palette[4:8] = bytes((0, 255, 0, 0))        # 索引1 -> 绿
-        row = bytes((1, 0)) + b"\x00\x00"           # 补齐到 4 字节
+        palette[0:4] = bytes((0, 0, 255, 0))        # index 0 -> red (stored as BGR)
+        palette[4:8] = bytes((0, 255, 0, 0))        # index 1 -> green
+        row = bytes((1, 0)) + b"\x00\x00"           # padded to 4 bytes
         back, bw, bh = IM.dib_to_rgba(header + bytes(palette) + row)
         self.assertEqual((bw, bh), (2, 1))
         self.assertEqual(back[0:4], bytes((0, 255, 0, 255)))
         self.assertEqual(back[4:8], bytes((255, 0, 0, 255)))
 
     def test_1bpp_and_4bpp_palette(self):
-        # 1bpp 只该有 2 个调色板项(biClrUsed=2): 写多了会让像素起点算错
+        # 1bpp must have only 2 palette entries (biClrUsed=2): extra ones shift the
+        # pixel start offset
         palette = bytearray(2 * 4)
         palette[0:4] = bytes((0, 0, 0, 0))
         palette[4:8] = bytes((255, 255, 255, 0))
         header = struct.pack("<IiiHHIIiiII", 40, 8, 1, 1, 1, 0, 4, 0, 0, 2, 0)
-        # DIB 每行按 4 字节对齐, 1bpp x 8 = 1 字节, 必须补 3 个填充字节
+        # DIB rows are 4-byte aligned; 1bpp x 8 = 1 byte, so 3 padding bytes are required
         data = bytes((0b10110001,)) + b"\x00\x00\x00"
         back, w, h = IM.dib_to_rgba(header + bytes(palette) + data)
         self.assertEqual((w, h), (8, 1))
@@ -272,7 +280,7 @@ class TestDib(unittest.TestCase):
         self.assertEqual(list(back[0::4]), expect)
 
     def test_clr_used_zero_means_full_palette(self):
-        """biClrUsed=0 时按 2^bpp 算调色板长度(标准行为)。"""
+        """With biClrUsed=0 the palette length is computed as 2^bpp (standard behaviour)."""
         palette = bytearray(2 * 4)
         palette[0:4] = bytes((0, 0, 0, 0))
         palette[4:8] = bytes((9, 9, 9, 0))
@@ -286,38 +294,40 @@ class TestDib(unittest.TestCase):
         for i in range(16):
             palette[i * 4:i * 4 + 4] = bytes((i * 16, i * 16, i * 16, 0))
         header = struct.pack("<IiiHHIIiiII", 40, 4, 1, 1, 4, 0, 4, 0, 0, 16, 0)
-        data = bytes((0x12, 0xF0)) + b"\x00\x00"      # 索引 1,2,15,0
+        data = bytes((0x12, 0xF0)) + b"\x00\x00"      # indices 1,2,15,0
         back, w, h = IM.dib_to_rgba(header + bytes(palette) + data)
         self.assertEqual((w, h), (4, 1))
         self.assertEqual(list(back[0::4]), [16, 32, 240, 0])
 
     def test_16bpp_555(self):
         header = struct.pack("<IiiHHIIiiII", 40, 2, 1, 1, 16, 0, 4, 0, 0, 0, 0)
-        # 0x7C00 = 纯红, 0x001F = 纯蓝
+        # 0x7C00 = pure red, 0x001F = pure blue
         pixels = struct.pack("<HH", 0x7C00, 0x001F)
         back, w, h = IM.dib_to_rgba(header + pixels)
         self.assertEqual(back[0:4], bytes((255, 0, 0, 255)))
         self.assertEqual(back[4:8], bytes((0, 0, 255, 255)))
 
     def test_bitfields_masks(self):
-        """带显式掩码的 32bpp(BI_BITFIELDS), 通道顺序不能想当然。
+        """32bpp with explicit masks (BI_BITFIELDS): the channel order must not be
+        taken for granted.
 
-        这里只给了 3 个掩码(没有 alpha), 所以第 4 个字节必须被忽略:
-        alpha 只能是 255, 不能把 0x80 当透明度 —— 那会把图搞得半透明。
+        Only 3 masks are given here (no alpha), so the fourth byte must be ignored:
+        alpha can only be 255, and 0x80 must not be read as opacity -- that would
+        make the image half transparent.
         """
         w, h = 2, 1
-        # 掩码: R=0x000000FF G=0x0000FF00 B=0x00FF0000
+        # masks: R=0x000000FF G=0x0000FF00 B=0x00FF0000
         header = struct.pack("<IiiHHIIiiII", 40, w, h, 1, 32, 3,
                              w * 4 * h, 0, 0, 0, 0)
         masks = struct.pack("<III", 0x000000FF, 0x0000FF00, 0x00FF0000)
-        px = struct.pack("<II", 0xFF0000FF, 0x8000FF00)   # 纯红, 未被掩码覆盖的高位=0x80
+        px = struct.pack("<II", 0xFF0000FF, 0x8000FF00)   # pure red; high bits not covered by any mask = 0x80
         back, bw, bh = IM.dib_to_rgba(header + masks + px)
         self.assertEqual(back[0:4], bytes((255, 0, 0, 255)))
         self.assertEqual(back[4:8], bytes((0, 255, 0, 255)))
 
     def test_v5_header_with_alpha_mask(self):
         w, h = 1, 1
-        # BITMAPV5HEADER(124 字节), 掩码在头内部
+        # BITMAPV5HEADER (124 bytes), with the masks inside the header
         header = struct.pack("<IiiHHIIiiII", 124, w, h, 1, 32, 3,
                              w * 4 * h, 0, 0, 0, 0)
         header += struct.pack("<IIII", 0x00FF0000, 0x0000FF00, 0x000000FF,
@@ -329,7 +339,7 @@ class TestDib(unittest.TestCase):
 
     def test_core_header(self):
         header = struct.pack("<IHHHH", 12, 2, 1, 1, 24)
-        px = bytes((3, 2, 1, 6, 5, 4)) + b"\x00\x00"    # 两条 BGR + 补齐
+        px = bytes((3, 2, 1, 6, 5, 4)) + b"\x00\x00"    # two BGR pixels + padding
         back, w, h = IM.dib_to_rgba(header + px)
         self.assertEqual((w, h), (2, 1))
         self.assertEqual(back[0:4], bytes((1, 2, 3, 255)))
@@ -359,8 +369,9 @@ class TestDib(unittest.TestCase):
 # ===========================================================================
 class TestBridges(unittest.TestCase):
     def test_dib_to_png_to_dib(self):
-        # seed=3 让 alpha 通道不全是 0: 全 0 的 alpha 与"没有 alpha"无法区分,
-        # 会被按不透明处理(这是有意的兼容行为, 单独在下面测)
+        # seed=3 keeps the alpha channel from being all zero: all-zero alpha cannot
+        # be told apart from "no alpha" and gets treated as opaque (an intentional
+        # compatibility behaviour, tested separately below)
         for (w, h) in ((1, 1), (5, 4), (40, 30)):
             rgba = rgba_bytes(w, h, seed=3)
             dib = IM.rgba_to_dib(rgba, w, h, bpp=32)
@@ -369,7 +380,7 @@ class TestBridges(unittest.TestCase):
             dib2 = IM.dib_from_png(png)
             back, bw, bh = IM.dib_to_rgba(dib2)
             self.assertEqual((bw, bh), (w, h))
-            self.assertEqual(back, rgba, "%dx%d 桥接往返不一致" % (w, h))
+            self.assertEqual(back, rgba, "%dx%d bridge roundtrip mismatch" % (w, h))
 
     def test_opaque_image_uses_24bpp(self):
         w, h = 4, 4
@@ -384,7 +395,7 @@ class TestBridges(unittest.TestCase):
     def test_transparent_image_uses_32bpp(self):
         w, h = 2, 2
         rgba = rgba_bytes(w, h)
-        png = IM.encode_png(rgba, w, h)             # 种子数据 alpha 不全是 255
+        png = IM.encode_png(rgba, w, h)             # seeded data: alpha is not all 255
         dib = IM.dib_from_png(png)
         self.assertEqual(struct.unpack_from("<H", dib, 14)[0], 32)
 

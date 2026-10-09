@@ -1,20 +1,21 @@
-"""CrossPC 线协议: 分帧 + 消息编解码。
+"""CrossPC wire protocol: framing + message encoding/decoding.
 
-帧格式(全部大端):
+Frame format (everything big-endian):
     +--------+--------+------------------+
     | len:u32| type:u8|   payload: len   |
     +--------+--------+------------------+
 
-* 控制类消息(HELLO/CLIPBOARD/CONTROL/PING)的 payload 是 UTF-8 JSON, 好调试;
-* 输入事件走 T_INPUT, payload 是紧凑二进制: 鼠标 1000Hz 下也不至于把
-  带宽和 CPU 浪费在 JSON 上。
+* The payload of control messages (HELLO/CLIPBOARD/CONTROL/PING) is UTF-8 JSON,
+  which makes them easier to debug;
+* input events travel in T_INPUT, whose payload is compact binary: at 1000Hz
+  for the mouse we should not be wasting bandwidth and CPU on JSON.
 
-输入批次 payload:
-    u16 count, 然后 count 条记录, 每条 = u8 kind + 定长字段
-      EV_MOTION  >hh   x, y       (client 本地坐标, 绝对定位)
+Input batch payload:
+    u16 count, then count records, each = u8 kind + fixed-size fields
+      EV_MOTION  >hh   x, y       (client local coordinates, absolute)
       EV_BUTTON  >BB   button, pressed
-      EV_WHEEL   >hh   dx, dy     (格数)
-      EV_KEY     >HHB  scancode, vk, flags(bit0=按下, bit1=E0 扩展)
+      EV_WHEEL   >hh   dx, dy     (notches)
+      EV_KEY     >HHB  scancode, vk, flags (bit0=pressed, bit1=E0 extended)
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ from .events import BUTTON, KEY, MOTION, WHEEL, Event
 
 MAGIC = "CrossPC"
 
-# ------------------------------------------------------------------ 帧类型
+# ------------------------------------------------------------------ frame types
 T_HELLO = 1
 T_HELLO_ACK = 2
 T_ERROR = 3
@@ -36,7 +37,8 @@ T_CLIPBOARD = 5
 T_CONTROL = 6
 T_PING = 7
 T_PONG = 8
-#: 图片剪辑板: payload 就是原始 PNG 字节(不走 JSON, 免得 base64 白涨 33%)
+#: Image clipboard: the payload is the raw PNG bytes (no JSON, so base64 cannot
+#: inflate it by 33% for nothing)
 T_CLIPBOARD_IMAGE = 9
 
 FRAME_HEADER = struct.Struct(">IB")
@@ -51,13 +53,14 @@ EV_BUTTON = 2
 EV_WHEEL = 3
 EV_KEY = 4
 
-#: 单帧上限, 防御性检查(恶意/错乱的长度字段不要让我们分配几个 G)
+#: Per-frame limit, a defensive check (a malicious or garbled length field must
+#: not make us allocate several gigabytes)
 MAX_FRAME = 8 * 1024 * 1024
-#: 剪辑板文本上限
+#: Clipboard text limit
 MAX_CLIPBOARD = 1 * 1024 * 1024
-#: 剪辑板图片上限(一帧 PNG 的字节数)
+#: Clipboard image limit (bytes of PNG in one frame)
 MAX_IMAGE = 8 * 1024 * 1024
-#: 一组运动坐标的合法范围(int16 传输)
+#: Valid range for one motion coordinate (transported as int16)
 _COORD_MIN, _COORD_MAX = -32768, 32767
 
 TYPE_NAMES = {
@@ -71,10 +74,10 @@ class ProtocolError(RuntimeError):
     pass
 
 
-# ------------------------------------------------------------------ 分帧
+# ------------------------------------------------------------------ framing
 def frame(msg_type: int, payload: bytes = b"") -> bytes:
     if len(payload) > MAX_FRAME:
-        raise ProtocolError("消息过长: %d 字节" % len(payload))
+        raise ProtocolError("message too long: %d bytes" % len(payload))
     return FRAME_HEADER.pack(len(payload), msg_type) + payload
 
 
@@ -83,7 +86,7 @@ def frame_json(msg_type: int, obj: Dict[str, Any]) -> bytes:
 
 
 class FrameReader:
-    """增量拆帧: 收到 TCP 字节流, 吐出 (type, payload)。"""
+    """Incremental de-framing: takes the TCP byte stream and yields (type, payload)."""
 
     def __init__(self) -> None:
         self._buf = bytearray()
@@ -96,7 +99,7 @@ class FrameReader:
                 break
             length, msg_type = FRAME_HEADER.unpack_from(self._buf, 0)
             if length > MAX_FRAME:
-                raise ProtocolError("帧长度异常: %d" % length)
+                raise ProtocolError("bad frame length: %d" % length)
             end = FRAME_HEADER.size + length
             if len(self._buf) < end:
                 break
@@ -112,13 +115,13 @@ def parse_json(payload: bytes) -> Dict[str, Any]:
     try:
         obj = json.loads(payload.decode("utf-8"))
     except Exception as exc:
-        raise ProtocolError("JSON 解析失败: %s" % exc) from exc
+        raise ProtocolError("JSON parse failed: %s" % exc) from exc
     if not isinstance(obj, dict):
-        raise ProtocolError("消息体必须是对象")
+        raise ProtocolError("message body must be an object")
     return obj
 
 
-# ------------------------------------------------------------------ 输入批次
+# ------------------------------------------------------------------ input batch
 def encode_input(events: Iterable[Event]) -> bytes:
     body = bytearray()
     count = 0
@@ -147,17 +150,19 @@ def encode_input(events: Iterable[Event]) -> bytes:
 
 def decode_input(payload: bytes) -> List[Event]:
     if len(payload) < _INPUT_COUNT.size:
-        raise ProtocolError("输入帧过短")
+        raise ProtocolError("input frame too short")
     (count,) = _INPUT_COUNT.unpack_from(payload, 0)
     off = _INPUT_COUNT.size
     out: List[Event] = []
     for _ in range(count):
         if off >= len(payload):
-            raise ProtocolError("输入帧截断(缺 kind)")
+            raise ProtocolError("input frame truncated (missing kind)")
         kind = payload[off]
         off += 1
-        # 长度不对时 struct 会抛 struct.error, 对上层来说都属于"协议坏了",
-        # 统一成 ProtocolError, 免得调用方要 catch 两种异常
+        # On a wrong length struct raises struct.error, which from the upper
+        # layer's point of view also means "the protocol is broken", so unify it
+        # into ProtocolError and spare the caller from catching two exception
+        # types
         try:
             if kind == EV_MOTION:
                 x, y = _EV_MOTION.unpack_from(payload, off)
@@ -176,13 +181,13 @@ def decode_input(payload: bytes) -> List[Event]:
                 off += _EV_KEY.size
                 out.append(Event.key(scan, vk, bool(flags & 1), bool(flags & 2)))
             else:
-                raise ProtocolError("未知输入事件类型 %d" % kind)
+                raise ProtocolError("unknown input event kind %d" % kind)
         except struct.error as exc:
-            raise ProtocolError("输入帧数据不完整: %s" % exc) from exc
+            raise ProtocolError("incomplete input frame data: %s" % exc) from exc
     return out
 
 
-# ------------------------------------------------------------------ 控制消息构造
+# ------------------------------------------------------------------ control message builders
 def hello(name: str, token: str, desktop: Dict[str, int],
           monitors: Optional[List[Dict[str, int]]] = None,
           version: str = "") -> bytes:
@@ -211,13 +216,15 @@ def clipboard_text(text: str, origin: str = "") -> bytes:
 
 
 def clipboard_image(png: bytes) -> bytes:
-    """图片剪辑板帧: payload 直接放 PNG 字节。
+    """Image clipboard frame: the payload holds the PNG bytes directly.
 
-    图片不带 origin 字段 —— 防回环靠内容哈希(上层已经按哈希去重), 不需要它,
-    而 base64 进 JSON 会让体积白涨三分之一。
+    The image carries no origin field -- loop prevention relies on the content
+    hash (the layer above already deduplicates by hash), so it is not needed,
+    while putting base64 into JSON would inflate the size by a third for nothing.
     """
     if len(png) > MAX_IMAGE:
-        raise ProtocolError("图片过大: %d 字节(上限 %d)" % (len(png), MAX_IMAGE))
+        raise ProtocolError("image too large: %d bytes (limit %d)"
+                            % (len(png), MAX_IMAGE))
     return frame(T_CLIPBOARD_IMAGE, png)
 
 

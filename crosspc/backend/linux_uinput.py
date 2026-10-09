@@ -1,19 +1,25 @@
-"""Linux /dev/uinput 注入器: 合成一个**绝对定位**的虚拟指针设备。
+"""Linux /dev/uinput injector: synthesize an **absolute-positioning** virtual pointer device.
 
-为什么是绝对设备(而不是相对鼠标):
-    相对鼠标(REL_X/REL_Y)写进去以后, 显示服务器/合成器会照样给它套上
-    "指针加速"和"提高指针精确度"之类的处理, 于是 CrossPC 算出来的位移
-    到了屏幕上就是错的, 而且是累积漂移的 —— 只要指针加速开着, 用相对
-    设备做 KVM 就不可能准。
-    绝对设备(类 tablet/触摸屏)走的是"直接跳到这个坐标"的语义, 合成器对
-    它不做加速, 只做一次线性映射, 所以 inject_motion(x, y) 给的绝对像素
-    坐标就是最终落点。代价是设备必须知道屏幕分辨率, 于是有 set_screen_size()。
+Why an absolute device (instead of a relative mouse):
+    Once a relative mouse (REL_X/REL_Y) is written, the display
+    server/compositor still applies "pointer acceleration" and "enhance pointer
+    precision"-style processing to it, so the delta CrossPC computes comes out
+    wrong on screen, and it drifts and accumulates -- as long as pointer
+    acceleration is on, a KVM built on a relative device can never be accurate.
+    An absolute device (tablet/touchscreen-like) has "jump straight to this
+    coordinate" semantics; the compositor does not accelerate it, it only applies
+    one linear mapping, so the absolute pixel coordinate handed to
+    inject_motion(x, y) is exactly where the pointer lands. The price is that the
+    device has to know the screen resolution, which is why set_screen_size()
+    exists.
 
-本模块顶层不加载任何东西、不打开任何设备: ctypes/结构体/常量都是纯 Python
-定义, 打开 /dev/uinput 只发生在 open() 里。这样 `python -m compileall` 以
-及在 Windows 上 import 本模块都不会炸(见 tests/test_linux_backend.py)。
+This module loads nothing and opens no device at the top level: ctypes, structures
+and constants are all plain Python definitions, and /dev/uinput is opened only
+inside open(). That way `python -m compileall` and importing this module on
+Windows both work (see tests/test_linux_backend.py).
 
-ioctl 常量的来源与算法: 见下面 _IOW / _IO 的注释(linux/uinput.h + asm-generic/ioctl.h)。
+Where the ioctl constants come from and how they are computed: see the comments on
+_IOW / _IO below (linux/uinput.h + asm-generic/ioctl.h).
 """
 from __future__ import annotations
 
@@ -28,16 +34,17 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 from .. import keys
 
 # ---------------------------------------------------------------------------
-# ioctl 编号手算
+# ioctl numbers computed by hand
 #
-# 来源: linux/asm-generic/ioctl.h
+# Source: linux/asm-generic/ioctl.h
 #     _IOC(dir,type,nr,size) = (dir << 30) | (size << 16) | (type << 8) | nr
-#     _IO (type,nr)  = _IOC(0, type, nr, 0)      无数据
-#     _IOW(type,nr,size 参数的类型) = _IOC(1, type, nr, sizeof(那个类型))
-#     _IOR 同 _IOW 只是 dir=2
-# uinput 的 type 永远是 'U' = 0x55; size 是"内核在 ioctl 里期望的数据大小"。
+#     _IO (type,nr)  = _IOC(0, type, nr, 0)      no data
+#     _IOW(type,nr,type of the size argument) = _IOC(1, type, nr, sizeof(that type))
+#     _IOR is the same as _IOW but with dir=2
+# The type for uinput is always 'U' = 0x55; size is "the size of the data the
+# kernel expects in the ioctl".
 #
-# 校验(可以和 /usr/include/linux/uinput.h 对照):
+# Verification (can be compared against /usr/include/linux/uinput.h):
 #     _IO ('U',1) = 0x5501                       UI_DEV_CREATE
 #     _IO ('U',2) = 0x5502                       UI_DEV_DESTROY
 #     _IOW('U',3, struct uinput_setup)           UI_DEV_SETUP
@@ -54,9 +61,11 @@ from .. import keys
 #     _IOW('U',110,int) =                        0x4004556E  UI_SET_PROPBIT
 #     _IOW('U',111,int) =                        0x4004556F  UI_SET_ABSBIT_SETUP
 #     _IOW('U',112,struct uinput_abs_setup)       UI_ABS_SETUP
-# 这里有个很容易踩的坑: UINPUT_IOCTL_BASE + 4 那个算法(把 nr 当成 4/5/6/7)
-# 是**错的**, 会得到 0x40045504 这种内核根本不认的编号, ioctl 直接 ENOTTY。
-# 正确的 nr 是 100 起步(见 uinput.h: UINPUT_IOCTL_BASE + 100 = UI_SET_EVBIT)。
+# There is a trap here that is very easy to fall into: the UINPUT_IOCTL_BASE + 4
+# algorithm (treating nr as 4/5/6/7) is **wrong** and produces numbers such as
+# 0x40045504 that the kernel does not recognize at all, making the ioctl return
+# ENOTTY straight away. The correct nr starts at 100 (see uinput.h:
+# UINPUT_IOCTL_BASE + 100 = UI_SET_EVBIT).
 _IOC_WRITE = 1
 _IOC_READ = 2
 
@@ -85,7 +94,7 @@ UI_SET_ABSBIT = _IOW(UINPUT_TYPE, 103, 4)                # 0x40045567
 UI_SET_PROPBIT = _IOW(UINPUT_TYPE, 110, 4)               # 0x4004556E
 
 # ---------------------------------------------------------------------------
-# 事件类型 / 事件码 (linux/input-event-codes.h)
+# Event types / event codes (linux/input-event-codes.h)
 EV_SYN = 0x00
 EV_KEY = 0x01
 EV_REL = 0x02
@@ -97,8 +106,9 @@ REL_WHEEL = 0x08
 
 ABS_X = 0x00
 ABS_Y = 0x01
-#: 绝对坐标的取值范围。0..65535 是内核 BTN_TOOL/ABS 类设备事实上的通用刻度,
-#: 2560x1440 这样的分辨率映射过去也远不到 1 像素的量化误差。
+#: Range of the absolute coordinates. 0..65535 is the de facto common scale of the
+#: kernel's BTN_TOOL/ABS-class devices; a resolution such as 2560x1440 maps into it
+#: with a quantization error far below one pixel.
 ABS_MAX = 65535
 
 BTN_LEFT = 0x110
@@ -107,8 +117,8 @@ BTN_MIDDLE = 0x112
 BTN_SIDE = 0x113
 BTN_EXTRA = 0x114
 
-#: X11 按钮编号(events.py 的约定) -> evdev BTN_*
-#: 8/9 是 X 的后退/前进键, 对应 BTN_SIDE/BTN_EXTRA。
+#: X11 button numbers (the convention in events.py) -> evdev BTN_*
+#: 8/9 are X's back/forward buttons, matching BTN_SIDE/BTN_EXTRA.
 BUTTON_TO_EVDEV: Dict[int, int] = {
     1: BTN_LEFT,
     2: BTN_MIDDLE,
@@ -119,30 +129,30 @@ BUTTON_TO_EVDEV: Dict[int, int] = {
 
 INPUT_PROP_POINTER = 0
 
-#: struct input_event 的大小: struct timeval(16) + type(2) + code(2) + value(4)
+#: Size of struct input_event: struct timeval(16) + type(2) + code(2) + value(4)
 INPUT_EVENT_SIZE = 24
-#: struct uinput_setup 的大小: input_id(8) + name[80] + ff_effects_max(4)
+#: Size of struct uinput_setup: input_id(8) + name[80] + ff_effects_max(4)
 UINPUT_SETUP_SIZE = 92
-#: struct uinput_user_dev 的大小: name[80] + input_id(8) + ff_effects_max(4) + absmax[64]*5*4
+#: Size of struct uinput_user_dev: name[80] + input_id(8) + ff_effects_max(4) + absmax[64]*5*4
 UINPUT_USER_DEV_SIZE = 80 + 8 + 4 + 64 * 5 * 4    # 1372
 
-#: 设备名(必须是 bytes, 内核按 C 字符串读)
+#: Device name (must be bytes; the kernel reads it as a C string)
 DEVICE_NAME = b"CrossPC Virtual Pointer"
 
-#: 扫描码表里有、但 evdev 码对不上普通区的几个键(见 keys.py 的注释)
+#: A few keys that are in the scancode table but whose evdev codes do not line up with the normal range (see the comments in keys.py)
 _EXTRA_EVDEV_CODES = (
     keys.EVDEV_PAUSE,        # 119 KEY_PAUSE
     keys.EVDEV_SYSRQ,        # 99  KEY_SYSRQ
-    58,                      # KEY_CAPSLOCK (0x3A 普通区 evdev 码不是 0x3A)
+    58,                      # KEY_CAPSLOCK (the normal-range evdev code is not 0x3A)
     69,                      # KEY_NUMLOCK
     70,                      # KEY_SCROLLLOCK
 )
 
 
 # ---------------------------------------------------------------------------
-# 结构体布局
+# Structure layout
 class _TimeVal(ctypes.Structure):
-    """struct timeval: 在 64 位 Linux 上是两个 8 字节(long)。"""
+    """struct timeval: two 8-byte values (long) on 64-bit Linux."""
 
     _fields_ = [("tv_sec", ctypes.c_long), ("tv_usec", ctypes.c_long)]
 
@@ -160,7 +170,7 @@ class _InputEvent(ctypes.Structure):
 
 
 class _InputId(ctypes.Structure):
-    """struct input_id (linux/input.h): 总线/厂商/产品/版本各 2 字节。"""
+    """struct input_id (linux/input.h): bus/vendor/product/version, 2 bytes each."""
 
     _fields_ = [("bustype", ctypes.c_uint16),
                 ("vendor", ctypes.c_uint16),
@@ -169,7 +179,7 @@ class _InputId(ctypes.Structure):
 
 
 class _UinputSetup(ctypes.Structure):
-    """struct uinput_setup (linux/uinput.h) —— 新接口 UI_DEV_SETUP 的载荷。
+    """struct uinput_setup (linux/uinput.h) -- the payload of the newer UI_DEV_SETUP interface.
 
         struct input_id id;  char name[UINPUT_MAX_NAME_SIZE];  __u32 ff_effects_max;
     """
@@ -180,19 +190,20 @@ class _UinputSetup(ctypes.Structure):
 
 
 class _UinputAbsinfo(ctypes.Structure):
-    """struct input_absinfo (linux/input.h): 每个绝对轴 5 个 __s32。"""
+    """struct input_absinfo (linux/input.h): 5 __s32 values per absolute axis."""
 
     _fields_ = [("value", ctypes.c_int32), ("minimum", ctypes.c_int32),
                 ("maximum", ctypes.c_int32), ("fuzz", ctypes.c_int32),
                 ("flat", ctypes.c_int32),
-                # resolution 是较新内核才加的, 但对 uinput_user_dev(老接口)而言
-                # 内核只读前 5 个字段(每个轴 20 字节), 所以这里不能加, 否则
-                # absmax 数组的元素步长就错了。
+                # resolution was only added by newer kernels, but for
+                # uinput_user_dev (the old interface) the kernel reads just the first
+                # 5 fields (20 bytes per axis), so it cannot be added here, otherwise
+                # the element stride of the absmax array would be wrong.
                 ]
 
 
 class _UinputUserDev(ctypes.Structure):
-    """struct uinput_user_dev (linux/uinput.h) —— 老接口, 直接 write() 给 fd。
+    """struct uinput_user_dev (linux/uinput.h) -- the old interface, written straight to the fd.
 
         char name[80];  struct input_id id;  __u32 ff_effects_max;
         __s32 absmax[ABS_CNT][5];     // ABS_CNT = 64
@@ -205,13 +216,15 @@ class _UinputUserDev(ctypes.Structure):
 
 
 # ---------------------------------------------------------------------------
-# 纯函数(不碰设备, 可在任意平台单测)
+# Pure functions (they touch no device and can be unit-tested on any platform)
 def pixel_to_abs(x: int, y: int, screen_w: int, screen_h: int) -> Tuple[int, int]:
-    """像素坐标 -> 绝对设备刻度 0..65535。
+    """Pixel coordinates -> absolute device scale 0..65535.
 
-    线性映射并把边界钉死: 0 -> 0, w-1 -> 65535。用"四舍五入"而不是截断,
-    否则 w-1 只会得到 65534, 屏幕最右下角那一列/一行永远点不到。
-    屏幕尺寸非法(<=0)时退化为 0..65535 的直通, 这样至少不会抛异常。
+    A linear mapping with the boundaries pinned down: 0 -> 0, w-1 -> 65535. It
+    rounds instead of truncating, otherwise w-1 would only reach 65534 and the
+    very last column/row at the bottom-right of the screen could never be reached.
+    When the screen size is invalid (<=0) it degrades to a straight pass-through
+    of 0..65535, so at least it never raises.
     """
     if screen_w <= 0 or screen_h <= 0:
         return (min(max(int(x), 0), ABS_MAX), min(max(int(y), 0), ABS_MAX))
@@ -222,17 +235,18 @@ def pixel_to_abs(x: int, y: int, screen_w: int, screen_h: int) -> Tuple[int, int
 
 def pack_event(type_: int, code: int, value: int,
                sec: Optional[int] = None, usec: Optional[int] = None) -> bytes:
-    """把一条 input_event 编码成 24 字节(纯函数, 便于单测)。
+    """Encode one input_event into 24 bytes (a pure function, easy to unit-test).
 
-    时间戳用 struct 而不是 ctypes 结构体来打包: 这样本函数在 Windows 上也能
-    正确算出 24 字节(Windows 的 c_long 只有 4 字节, ctypes 结构体会是 16 字节)。
+    The timestamp is packed with struct rather than a ctypes structure: that way
+    this function still computes the correct 24 bytes on Windows (on Windows c_long
+    is only 4 bytes, so the ctypes structure would be 16 bytes).
     """
     if sec is None:
         now = time.time()
         sec = int(now)
         usec = int((now - sec) * 1000000)
     usec = int(usec or 0)
-    # 防止浮点误差把 usec 顶到 1000000(内核会当成非法时间戳)
+    # Keep floating-point error from pushing usec up to 1000000 (the kernel treats that as an invalid timestamp)
     if usec >= 1000000:
         sec += usec // 1000000
         usec %= 1000000
@@ -244,15 +258,17 @@ def pack_event(type_: int, code: int, value: int,
 
 
 def button_to_evdev(button: int) -> Optional[int]:
-    """X11 按钮编号 -> evdev BTN_*, 未知返回 None(调用方记日志并跳过)。"""
+    """X11 button number -> evdev BTN_*; returns None when unknown (the caller logs and skips)."""
     return BUTTON_TO_EVDEV.get(int(button))
 
 
 def keyboard_evdev_codes() -> Set[int]:
-    """把 keys.py 里出现过的扫描码全部翻成 evdev 码, 供注册 KEYBIT。
+    """Translate every scancode that appears in keys.py into an evdev code, for KEYBIT registration.
 
-    直接遍历 keys.py 的两张表(而不是另抄一份键表): 以后 keys.py 加了键,
-    这里自动跟着注册, 不会出现"表里有、设备没注册"的哑键。
+    It walks the two tables in keys.py directly (rather than copying a key table
+    of its own): when keys.py gains a key later, registration here follows along
+    automatically, so there are no dead keys that exist "in the table but not
+    registered on the device".
     """
     codes: Set[int] = set(_EXTRA_EVDEV_CODES)
     for scan in keys.SCAN_TO_KEYSYM:
@@ -268,9 +284,10 @@ def keyboard_evdev_codes() -> Set[int]:
 
 # ---------------------------------------------------------------------------
 class UInputInjector:
-    """用 /dev/uinput 合成虚拟指针 + 键盘, 做绝对定位注入。
+    """Synthesize a virtual pointer + keyboard through /dev/uinput for absolute-positioning injection.
 
-    线程约定: 实例内部用一把锁保护 write(), 可以从任意线程调用注入方法。
+    Threading contract: the instance protects write() with a lock internally, so
+    the injection methods can be called from any thread.
     """
 
     name = "uinput"
@@ -287,45 +304,49 @@ class UInputInjector:
     def _say(self, msg: str) -> None:
         self._log("[uinput] %s" % msg)
 
-    # ------------------------------------------------------------ 生命周期
+    # ------------------------------------------------------------ lifecycle
     @property
     def opened(self) -> bool:
         return self._fd is not None
 
     def open(self) -> None:
-        """打开 /dev/uinput 并注册设备能力 + UI_DEV_CREATE。幂等。"""
+        """Open /dev/uinput and register the device capabilities + UI_DEV_CREATE. Idempotent."""
         if self._fd is not None:
             return
         try:
-            import fcntl                       # 只在 Linux 上存在, 延迟 import
+            import fcntl                       # only present on Linux, imported lazily
         except ImportError as exc:             # pragma: no cover - Windows
             raise RuntimeError(
-                "当前平台没有 fcntl 模块, 无法使用 /dev/uinput 注入(仅 Linux 支持)") from exc
+                "this platform has no fcntl module, so /dev/uinput injection is "
+                "unavailable (Linux only)") from exc
 
         fd = None
         try:
             fd = os.open(self.device_path, os.O_WRONLY | os.O_NONBLOCK)
         except FileNotFoundError as exc:
             raise RuntimeError(
-                "%s 不存在。uinput 内核模块没有加载或者被裁掉了: "
-                "先运行 sudo modprobe uinput, 或直接跑 tools/install_linux.sh "
-                "帮你在 Debian 上装好依赖、加载模块并写 udev 规则。" % self.device_path
+                "%s does not exist. The uinput kernel module is not loaded or was "
+                "built out: run sudo modprobe uinput first, or just run "
+                "tools/install_linux.sh, which installs the dependencies on Debian, "
+                "loads the module and writes the udev rules." % self.device_path
             ) from exc
         except PermissionError as exc:
             raise RuntimeError(
-                "没有权限打开 %s。请把当前用户加入 input 组并重新登录"
-                "(sudo usermod -aG input $USER), 或运行 tools/install_linux.sh "
-                "写入 /etc/udev/rules.d/99-crosspc-uinput.rules 后重新插拔一次会话。"
-                % self.device_path) from exc
+                "no permission to open %s. Add the current user to the input group "
+                "and log in again (sudo usermod -aG input $USER), or run "
+                "tools/install_linux.sh to write "
+                "/etc/udev/rules.d/99-crosspc-uinput.rules and then log the session "
+                "out and back in." % self.device_path) from exc
         except OSError as exc:
             raise RuntimeError(
-                "打开 %s 失败: %s。请确认内核支持 uinput(sudo modprobe uinput) "
-                "以及当前用户有权限。" % (self.device_path, exc)) from exc
+                "failed to open %s: %s. Make sure the kernel supports uinput "
+                "(sudo modprobe uinput) and that the current user has permission."
+                % (self.device_path, exc)) from exc
 
         try:
             self._setup_device(fd, fcntl)
         except Exception:
-            # 半途失败必须把 fd 关掉, 否则会占着一个设备节点
+            # A failure part-way through must close the fd, otherwise a device node stays occupied
             try:
                 os.close(fd)
             except OSError:
@@ -335,7 +356,7 @@ class UInputInjector:
         self._fd = fd
 
     def _setup_device(self, fd: int, fcntl) -> None:
-        """注册能力 + 设备信息 + UI_DEV_CREATE。"""
+        """Register capabilities + device information + UI_DEV_CREATE."""
         self._bit(fcntl, fd, UI_SET_EVBIT, EV_KEY)
         self._bit(fcntl, fd, UI_SET_EVBIT, EV_ABS)
         self._bit(fcntl, fd, UI_SET_EVBIT, EV_REL)
@@ -347,34 +368,35 @@ class UInputInjector:
         self._bit(fcntl, fd, UI_SET_ABSBIT, ABS_Y)
         self._bit(fcntl, fd, UI_SET_RELBIT, REL_WHEEL)
         self._bit(fcntl, fd, UI_SET_RELBIT, REL_HWHEEL)
-        # INPUT_PROP_POINTER: 告诉 X/合成器"这是个指点设备", 让它走指针那条
-        # 代码路径(而不是被当成画板/手柄)。
+        # INPUT_PROP_POINTER: tell X/the compositor that "this is a pointing
+        # device" so that it takes the pointer code path (rather than treating it
+        # as a drawing tablet/gamepad).
         self._bit(fcntl, fd, UI_SET_PROPBIT, INPUT_PROP_POINTER)
 
         setup = _UinputSetup()
         ctypes.memset(ctypes.byref(setup), 0, ctypes.sizeof(setup))
         setup.id.bustype = 0x03                # BUS_USB
-        setup.id.vendor = 0x1D6B               # 随便给个不冲突的 id
+        setup.id.vendor = 0x1D6B               # an arbitrary id that does not conflict
         setup.id.product = 0x0001
         setup.id.version = 1
         setup.name = DEVICE_NAME
         setup.ff_effects_max = 0
-        if ctypes.sizeof(setup) != UINPUT_SETUP_SIZE:   # pragma: no cover - 自检
-            raise RuntimeError("uinput_setup 结构体大小异常: %d" % ctypes.sizeof(setup))
+        if ctypes.sizeof(setup) != UINPUT_SETUP_SIZE:   # pragma: no cover - self-check
+            raise RuntimeError("unexpected uinput_setup structure size: %d" % ctypes.sizeof(setup))
 
         try:
-            # 新接口: UI_DEV_SETUP 一次带上 input_id/name, 内核 >= 2.6.38(2011)。
+            # Newer interface: UI_DEV_SETUP carries input_id/name in one call, kernel >= 2.6.38 (2011).
             fcntl.ioctl(fd, UI_DEV_SETUP, ctypes.byref(setup))
         except OSError:
-            # 回退: 老接口把 struct uinput_user_dev 整个 write() 进去。
-            self._say("UI_DEV_SETUP 不可用, 回退到老的 uinput_user_dev 接口")
+            # Fallback: the old interface write()s the whole struct uinput_user_dev.
+            self._say("UI_DEV_SETUP is unavailable, falling back to the old uinput_user_dev interface")
             self._write_legacy_user_dev(fd)
 
         fcntl.ioctl(fd, UI_DEV_CREATE, 0)
         self._created = True
-        # 设备刚创建时 X 还没枚举到它, 给它一点时间, 否则前几个事件会丢。
+        # X has not enumerated the device right after creation, so give it a moment, otherwise the first few events are lost.
         time.sleep(0.05)
-        self._say("已创建虚拟指针设备 %r" % DEVICE_NAME.decode())
+        self._say("created virtual pointer device %r" % DEVICE_NAME.decode())
 
     def _write_legacy_user_dev(self, fd: int) -> None:
         dev = _UinputUserDev()
@@ -389,30 +411,34 @@ class UInputInjector:
         dev.absmax[ABS_Y].minimum = 0
         dev.absmax[ABS_Y].maximum = ABS_MAX
         raw = ctypes.string_at(ctypes.byref(dev), ctypes.sizeof(dev))
-        if len(raw) != UINPUT_USER_DEV_SIZE:   # pragma: no cover - 自检
-            raise RuntimeError("uinput_user_dev 结构体大小异常: %d" % len(raw))
+        if len(raw) != UINPUT_USER_DEV_SIZE:   # pragma: no cover - self-check
+            raise RuntimeError("unexpected uinput_user_dev structure size: %d" % len(raw))
         os.write(fd, raw)
 
     @staticmethod
     def _bit(fcntl, fd: int, request: int, value: int) -> None:
-        """UI_SET_* 的载荷是一个 int(要打开的那一位的编号)。
+        """The payload of UI_SET_* is an int (the number of the bit to turn on).
 
-        有的内核不接受值 0(历史上 0 被当成"空指针 => 关掉全部"), 所以统一
-        用 ctypes.c_int 传地址, 保证任何实现下都是"打开第 value 位"。
+        Some kernels reject the value 0 (historically 0 was treated as "null
+        pointer => turn everything off"), so a ctypes.c_int address is always
+        passed, guaranteeing "turn on bit number value" under every implementation.
 
-        这里把 OSError 全部吞掉、只记日志: 不同内核版本支持的 UI_SET_* 集合
-        不一样(例如很老的内核没有 PROPBIT、没有 REL_HWHEEL 对应的能力位),
-        单个位注册失败不该让整个设备起不来 —— 退化成"少一个不常用的按键",
-        比 client 直接不能注入要好。后面 UI_DEV_CREATE 如果真失败会照常抛。
+        Every OSError is swallowed here and merely logged: different kernel
+        versions support different sets of UI_SET_* (very old kernels have no
+        PROPBIT and no capability bit for REL_HWHEEL, for example), and one failed
+        bit registration should not keep the whole device from coming up --
+        degrading to "one uncommon key is missing" is better than the client being
+        unable to inject at all. If UI_DEV_CREATE later fails for real, that is
+        still raised as usual.
         """
         try:
             fcntl.ioctl(fd, request, ctypes.c_int(int(value)))
-        except OSError as exc:                 # pragma: no cover - 依赖具体内核
-            self._say("注册能力失败(request=0x%08X value=%d, 忽略并继续): %s"
+        except OSError as exc:                 # pragma: no cover - depends on the specific kernel
+            self._say("failed to register capability (request=0x%08X value=%d, ignoring and continuing): %s"
                       % (request, value, exc))
 
     def close(self) -> None:
-        """UI_DEV_DESTROY 并关掉 fd。可从任意线程调用, 幂等。"""
+        """UI_DEV_DESTROY and close the fd. Callable from any thread, idempotent."""
         with self._lock:
             fd, self._fd = self._fd, None
             if fd is None:
@@ -421,8 +447,8 @@ class UInputInjector:
                 import fcntl
                 if self._created:
                     fcntl.ioctl(fd, UI_DEV_DESTROY, 0)
-            except Exception as exc:           # pragma: no cover - 关设备失败不致命
-                self._say("销毁虚拟设备失败(忽略): %s" % exc)
+            except Exception as exc:           # pragma: no cover - failing to close a device is not fatal
+                self._say("failed to destroy the virtual device (ignored): %s" % exc)
             finally:
                 self._created = False
                 try:
@@ -430,45 +456,48 @@ class UInputInjector:
                 except OSError:
                     pass
 
-    # ------------------------------------------------------------ 屏幕尺寸
+    # ------------------------------------------------------------ screen size
     def set_screen_size(self, width: int, height: int) -> None:
-        """设定绝对坐标映射的目标分辨率(像素)。"""
+        """Set the target resolution (in pixels) used to map the absolute coordinates."""
         if width > 0 and height > 0:
             self._screen_size = (int(width), int(height))
-            self._say("屏幕尺寸设为 %dx%d" % self._screen_size)
+            self._say("screen size set to %dx%d" % self._screen_size)
 
     @property
     def screen_size(self) -> Optional[Tuple[int, int]]:
         return self._screen_size
 
-    # ------------------------------------------------------------ 写事件
+    # ------------------------------------------------------------ writing events
     def _emit(self, type_: int, code: int, value: int) -> None:
-        """写一条事件。调用方自己负责成组后补 SYN_REPORT。"""
+        """Write one event. The caller is responsible for appending SYN_REPORT after a group."""
         fd = self._fd
         if fd is None:
-            raise RuntimeError("uinput 设备尚未打开(先调用 open())")
+            raise RuntimeError("the uinput device is not open yet (call open() first)")
         os.write(fd, pack_event(type_, code, value))
 
     def _sync(self) -> None:
         self._emit(EV_SYN, SYN_REPORT, 0)
 
-    # ------------------------------------------------------------ 注入
+    # ------------------------------------------------------------ injection
     def inject_motion(self, x: int, y: int,
                       screen_w: Optional[int] = None,
                       screen_h: Optional[int] = None) -> None:
-        """把像素坐标线性映射到 0..65535 后写 ABS_X/ABS_Y。
+        """Map pixel coordinates linearly into 0..65535, then write ABS_X/ABS_Y.
 
-        绝对设备不需要屏幕尺寸也能"按比例"动, 但要让落点等于像素坐标就
-        必须知道分辨率: 优先用本次传入的值, 其次用 set_screen_size() 设过的。
+        An absolute device can move "proportionally" without knowing the screen
+        size, but making the landing point equal the pixel coordinate does require
+        the resolution: the value passed to this call takes priority, then whatever
+        set_screen_size() configured.
         """
         with self._lock:
             w = screen_w if screen_w else (self._screen_size[0] if self._screen_size else 0)
             h = screen_h if screen_h else (self._screen_size[1] if self._screen_size else 0)
             if not w or not h:
                 raise RuntimeError(
-                    "uinput 注入需要屏幕分辨率才能把坐标映射到绝对设备: "
-                    "请设置环境变量 CROSSPC_SCREEN=宽x高(例如 2560x1440), "
-                    "或让上层调用 set_screen_size()")
+                    "uinput injection needs the screen resolution to map coordinates "
+                    "onto an absolute device: set the CROSSPC_SCREEN=WxH environment "
+                    "variable (for example 2560x1440), or have the upper layer call "
+                    "set_screen_size()")
             ax, ay = pixel_to_abs(x, y, w, h)
             self._emit(EV_ABS, ABS_X, ax)
             self._emit(EV_ABS, ABS_Y, ay)
@@ -477,14 +506,14 @@ class UInputInjector:
     def inject_button(self, button: int, pressed: bool) -> None:
         code = button_to_evdev(button)
         if code is None:
-            self._say("未知鼠标按键 %r, 已跳过" % (button,))
+            self._say("unknown mouse button %r, skipped" % (button,))
             return
         with self._lock:
             self._emit(EV_KEY, code, 1 if pressed else 0)
             self._sync()
 
     def inject_wheel(self, dx: int, dy: int) -> None:
-        """dx 右为正 -> REL_HWHEEL; dy 上/远离用户为正 -> REL_WHEEL。"""
+        """dx positive to the right -> REL_HWHEEL; dy positive up/away from the user -> REL_WHEEL."""
         with self._lock:
             if dy:
                 self._emit(EV_REL, REL_WHEEL, int(dy))
@@ -497,48 +526,50 @@ class UInputInjector:
                    extended: bool = False) -> None:
         code = keys.evdev_for(scancode, vk, extended)
         if code is None:
-            self._say("扫描码 0x%02X(vk=0x%02X%s) 没有对应的 evdev 码, 已跳过"
+            self._say("scancode 0x%02X (vk=0x%02X%s) has no matching evdev code, skipped"
                       % (scancode, vk, " ext" if extended else ""))
             return
         with self._lock:
             self._emit(EV_KEY, code, 1 if pressed else 0)
             self._sync()
 
-    # ------------------------------------------------------------ 自检
+    # ------------------------------------------------------------ self-check
     @staticmethod
     def available() -> Tuple[bool, str]:
-        """(能否用 uinput, 中文说明)。绝不抛异常, 供 doctor 用。"""
+        """(whether uinput can be used, explanation). Never raises; used by doctor."""
         path = "/dev/uinput"
         try:
             if not os.path.exists("/sys/class/misc/uinput"):
-                # 设备节点可能是"模块还没加载"或"内核没编 uinput"
-                return (False, "uinput 内核模块未加载: 运行 sudo modprobe uinput"
-                               "(或 tools/install_linux.sh), 必要时重启")
+                # The device node may be missing because the module is not loaded yet or the kernel was built without uinput
+                return (False, "the uinput kernel module is not loaded: run "
+                               "sudo modprobe uinput (or tools/install_linux.sh), "
+                               "reboot if necessary")
             if not os.path.exists(path):
-                return (False, "%s 不存在: sudo modprobe uinput, 或检查 udev 规则"
-                               "(tools/install_linux.sh)" % path)
+                return (False, "%s does not exist: sudo modprobe uinput, or check the "
+                               "udev rules (tools/install_linux.sh)" % path)
             if not os.access(path, os.R_OK | os.W_OK):
-                return (False, "当前用户没有读写 %s 的权限: 把用户加入 input 组"
-                               "(sudo usermod -aG input $USER) 后重新登录, "
-                               "或运行 tools/install_linux.sh 安装 udev 规则" % path)
-        except Exception as exc:               # pragma: no cover - 兜底
-            return (False, "检查 uinput 时出错: %s" % exc)
-        return (True, "%s 可读写, 可以合成绝对定位的虚拟指针设备" % path)
+                return (False, "the current user lacks read/write permission on %s: "
+                               "add the user to the input group "
+                               "(sudo usermod -aG input $USER) and log in again, or run "
+                               "tools/install_linux.sh to install the udev rules" % path)
+        except Exception as exc:               # pragma: no cover - fallback
+            return (False, "error while checking uinput: %s" % exc)
+        return (True, "%s is readable/writable, an absolute-positioning virtual pointer device can be synthesized" % path)
 
 
 def open_injector(log: Optional[Callable[[str], None]] = None
                   ) -> Optional[UInputInjector]:
-    """方便函数: 可用就打开并返回, 否则返回 None(错误写进日志)。"""
+    """Convenience function: open and return it when available, otherwise return None (the error goes to the log)."""
     ok, why = UInputInjector.available()
     if not ok:
         if log:
-            log("[uinput] 不可用: %s" % why)
+            log("[uinput] unavailable: %s" % why)
         return None
     inj = UInputInjector(log=log)
     try:
         inj.open()
     except Exception as exc:
         if log:
-            log("[uinput] 打开失败: %s" % exc)
+            log("[uinput] failed to open: %s" % exc)
         return None
     return inj

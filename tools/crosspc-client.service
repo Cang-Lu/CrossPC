@@ -1,48 +1,54 @@
-# CrossPC client 的 systemd **用户**服务(Debian 上让 client 开机自启)
+# systemd **user** service for the CrossPC client (autostart the client on Debian)
 #
-# 安装:
+# Install:
 #   mkdir -p ~/.config/systemd/user
 #   cp tools/crosspc-client.service ~/.config/systemd/user/
-#   # 按下面的注释改好路径/IP/分辨率
+#   # adjust the path/IP/resolution as described in the comments below
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now crosspc-client
 #   systemctl --user status crosspc-client
-#   journalctl --user -u crosspc-client -f        # 看日志
+#   journalctl --user -u crosspc-client -f        # follow the logs
 #
-# 重要: 用户服务默认拿不到图形会话的环境变量(X11/Wayland), 先执行一次:
+# Important: a user service does not inherit the graphical session environment
+# variables (X11/Wayland) by default, so run this once:
 #   systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY
-# 并考虑在 ~/.bash_profile 或 ~/.xprofile 里也加上这句, 让它开机自动生效。
+# and consider adding that line to ~/.bash_profile or ~/.xprofile as well so it
+# takes effect automatically at boot.
 #
-# 注意: 如果 client 端用的是 uinput(Wayland), CROSSPC_SCREEN 必须填**准确**的分辨率,
-# 否则绝对坐标会整体偏移。
+# Note: if the client uses uinput (Wayland), CROSSPC_SCREEN must hold the
+# **exact** resolution, otherwise the absolute coordinates will be offset.
 
 [Unit]
-Description=CrossPC client —— 通过局域网接收另一台电脑的鼠标键盘
+Description=CrossPC client -- receive another computer's mouse and keyboard over the LAN
 Documentation=file:%h/CrossPC/README.md
-# 等图形会话起来再连(没有图形会话的话 X11 注入会失败)
+# Connect once the graphical session is up (X11 injection fails without one)
 After=graphical-session.target network-online.target
 PartOf=graphical-session.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-# ↓↓↓ 按需修改这三行 ↓↓↓
+# >>> edit these three lines as needed >>>
 WorkingDirectory=%h/CrossPC
 Environment=CROSSPC_SCREEN=2560x1440
-# X11 桌面一般就是 :0; Wayland 下请留空并把 WAYLAND_DISPLAY 配好
+# An X11 desktop is usually just :0; on Wayland leave this empty and set
+# WAYLAND_DISPLAY properly
 Environment=DISPLAY=:0
-# ↑↑↑ 按需修改 ↑↑↑
+# <<< edit these lines as needed <<<
 
-# 不带 --host 时会用 UDP 自动发现 server; 想稳一点就写死 IP
+# Without --host the client finds the server over UDP; pin the IP for stability
 ExecStart=/usr/bin/python3 -m crosspc client --host 192.168.1.10
 
-# 断了自动重连(client 内部也有重连, 这里再兜一层)
+# Reconnect automatically after a drop (the client reconnects internally too;
+# this is one more safety net)
 Restart=always
 RestartSec=3
 
-# uinput 需要访问 /dev/uinput; 跑过 tools/install_linux.sh 并重新登录后,
-# input 组已经能访问它, 所以通常不需要放宽权限。
-# 若仍然报权限错误, 可以打开下面两行(安全性略降):
+# uinput needs access to /dev/uinput; after running tools/install_linux.sh and
+# logging back in, the input group can already access it, so relaxing the
+# permissions is normally unnecessary.
+# If you still get permission errors, uncomment the two lines below (slightly
+# less secure):
 #SupplementaryGroups=input
 #DeviceAllow=/dev/uinput rw
 
