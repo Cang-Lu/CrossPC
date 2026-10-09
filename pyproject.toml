@@ -1,0 +1,32 @@
+[build-system]
+# 纯标准库项目: 用 setuptools 打包只是为了能 pip install, 运行时不需要任何依赖
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crosspc"
+version = "0.1.0"
+description = "局域网内共享一套鼠标键盘(Windows server + Debian client)"
+readme = "README.md"
+requires-python = ">=3.8"
+#: 运行时零依赖 —— 真的一个第三方包都不需要
+dependencies = []
+keywords = ["kvm", "synergy", "barrier", "clipboard", "lan", "remote-input"]
+classifiers = [
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: X11 Applications",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Networking",
+    "Topic :: Utilities",
+]
+
+[project.scripts]
+crosspc = "crosspc.cli:main"
+
+[tool.setuptools]
+packages = ["crosspc", "crosspc.backend"]
+
+[tool.setuptools.package-data]
+crosspc = ["py.typed"]

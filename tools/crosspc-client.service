@@ -1,0 +1,50 @@
+# CrossPC client 的 systemd **用户**服务(Debian 上让 client 开机自启)
+#
+# 安装:
+#   mkdir -p ~/.config/systemd/user
+#   cp tools/crosspc-client.service ~/.config/systemd/user/
+#   # 按下面的注释改好路径/IP/分辨率
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now crosspc-client
+#   systemctl --user status crosspc-client
+#   journalctl --user -u crosspc-client -f        # 看日志
+#
+# 重要: 用户服务默认拿不到图形会话的环境变量(X11/Wayland), 先执行一次:
+#   systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY
+# 并考虑在 ~/.bash_profile 或 ~/.xprofile 里也加上这句, 让它开机自动生效。
+#
+# 注意: 如果 client 端用的是 uinput(Wayland), CROSSPC_SCREEN 必须填**准确**的分辨率,
+# 否则绝对坐标会整体偏移。
+
+[Unit]
+Description=CrossPC client —— 通过局域网接收另一台电脑的鼠标键盘
+Documentation=file:%h/CrossPC/README.md
+# 等图形会话起来再连(没有图形会话的话 X11 注入会失败)
+After=graphical-session.target network-online.target
+PartOf=graphical-session.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# ↓↓↓ 按需修改这三行 ↓↓↓
+WorkingDirectory=%h/CrossPC
+Environment=CROSSPC_SCREEN=2560x1440
+# X11 桌面一般就是 :0; Wayland 下请留空并把 WAYLAND_DISPLAY 配好
+Environment=DISPLAY=:0
+# ↑↑↑ 按需修改 ↑↑↑
+
+# 不带 --host 时会用 UDP 自动发现 server; 想稳一点就写死 IP
+ExecStart=/usr/bin/python3 -m crosspc client --host 192.168.1.10
+
+# 断了自动重连(client 内部也有重连, 这里再兜一层)
+Restart=always
+RestartSec=3
+
+# uinput 需要访问 /dev/uinput; 跑过 tools/install_linux.sh 并重新登录后,
+# input 组已经能访问它, 所以通常不需要放宽权限。
+# 若仍然报权限错误, 可以打开下面两行(安全性略降):
+#SupplementaryGroups=input
+#DeviceAllow=/dev/uinput rw
+
+[Install]
+WantedBy=default.target

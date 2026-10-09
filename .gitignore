@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# CrossPC 运行时产物(配置里含你的 IP/口令, 不要提交)
+crosspc.json
+crosspc.cache.json
+*.cache.json
+.crosspc-*
+
+# 真机测试日志与发行包
+logs/
+dist/
+
+# 编辑器/系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
